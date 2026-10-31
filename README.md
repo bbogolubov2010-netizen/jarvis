@@ -15,7 +15,7 @@ The AI model runs on your machine through Ollama. JARVIS has no telemetry, no ac
 - **System commands**: application launching, volume control, screenshots, shutdown, and restart.
 - **File commands** restricted to an allowlist: Desktop, Documents, and the JARVIS config folder.
 - **Notes** persisted locally and encrypted with Windows DPAPI.
-- **Web search**: DuckDuckGo results are fetched through an egress-filtered headless browser, sanitized, and summarized by the local model.
+- **Web search**: DuckDuckGo results are fetched through an address-validated HTTP client (the headless-browser path additionally uses a loopback egress proxy), sanitized, and summarized by the local model.
 - **Image generation** through Pollinations.ai, disabled until you explicitly opt in in Settings.
 - **System tray** with Show / Hide / Quit, and a global `Ctrl+Shift+J` hotkey. Closing the window hides JARVIS to the tray; the tray **Quit** item is the only real exit.
 - **Spoken phrases** for actions, with an on/off toggle in Settings.
@@ -80,7 +80,7 @@ voice-engine/
 
 The app searches `voice-engine` next to the executable, then `%AppData%\Jarvis\voice-engine`. The engine status and the detected Whisper model are shown in Settings. The full `ggml-large-v3-turbo.bin` model is preferred; q8/q5/large-v3/medium/small fallbacks are accepted. If Whisper is missing, wake-word detection still loads but commands cannot be transcribed. The English Vosk model is optional: without it, English commands are still recognized by Whisper, but only the Russian wake word is detected.
 
-JARVIS does not speak its replies. Answers are shown in the window only; short confirmation phrases and the greeting still use the local voice pack. Wake words are detected with Vosk; commands and free-form chat are transcribed with Whisper and sent only to the local Ollama server. Weather, first-launch geolocation, and optional web search use the network. The browser process is routed through a loopback filtering proxy that rejects private, loopback, link-local, and non-public destinations.
+JARVIS does not speak its replies. Answers are shown in the window only; short confirmation phrases and the greeting still use the local voice pack. Wake words are detected with Vosk; commands and free-form chat are transcribed with Whisper and sent only to the local Ollama server. Weather, first-launch geolocation, and optional web search use the network. Every outbound web request is resolved and checked against a public-address allowlist first: private, loopback, link-local, and other non-public destinations are rejected. The headless browser additionally sends all traffic through a loopback filtering proxy.
 
 To keep JARVIS available at every logon, enable **Auto-start with Windows** in Settings. The entry runs `Jarvis.exe --hidden`: the full application starts with its window hidden in the tray, so the wake word, the `Ctrl+Shift+J` hotkey and the tray icon work immediately. Legacy `--voice-agent-supervisor` and `--voice-agent` entries are migrated to `--hidden` on the next start. The Settings panel shows the current Run value, whether the executable exists, and a **TEST START** button that launches a headless self-check (`--autostart-check`) without disturbing the running instance. JARVIS also clears a stale Explorer `StartupApproved` flag, which is a common reason a valid Run entry silently stops starting.
 
@@ -166,7 +166,7 @@ Settings can be changed in the in-app Settings panel. The Ollama URL must be an 
 - **Prompt-injection sanitation** for fetched web content and voice input. Untrusted page text is truncated and stripped of instruction-like patterns before it reaches the model; the same sanitizer neutralizes recognized voice commands before they are stored or routed. This reduces risk; it does not eliminate it.
 - **Encrypted settings, history, and notes** using Windows DPAPI, scoped to the current user. Legacy plaintext history/notes are readable for migration but are re-encrypted on the next save.
 - **Authenticated background-agent IPC.** The agent launches the app without command-line payloads and delivers commands over a random loopback port. Requests are HMAC-SHA256 signed with a DPAPI-protected token, checked against a 30-second clock window, and deduplicated by nonce.
-- **Browser egress filtering.** Chromium uses a loopback proxy that resolves each destination and rejects private, loopback, link-local, carrier-grade NAT, documentation, and other non-public addresses, including DNS-rebinding and redirect targets. Only ports 80 and 443 are allowed.
+- **Browser egress filtering.** Chromium uses a loopback proxy that resolves each destination and rejects private, loopback, link-local, carrier-grade NAT, documentation, and other non-public addresses, including DNS-rebinding and redirect targets. Only ports 80 and 443 are allowed. Direct web requests (`/search`, the `/smart` fallback, and image generation) use the same public-IP validation in their HTTP transport, so a redirect cannot reach a local service.
 - **Image generation is opt-in.** Prompts are sent to Pollinations.ai only after the user enables image generation in Settings.
 - **Optional voice-engine checksums.** A generated manifest detects modified or missing core speech binaries before the microphone is used.
 - **Audit log** of actions and confirmations, retained for 30 days.
@@ -210,6 +210,7 @@ internal/hotkey         Global hotkey registration
 internal/intent         Typed confirmation intents with TTL
 internal/ipc            Authenticated loopback command channel for the background agent
 internal/jobobject      Job object for child process cleanup
+internal/netguard       Public-address validation for direct HTTP requests
 internal/ollama         Ollama HTTP client
 internal/reminders      Persistent reminders and timers
 internal/safepath       Path allowlist and traversal protection
@@ -241,7 +242,7 @@ npm ci
 npm run build
 ```
 
-`npm run build` runs `vue-tsc --noEmit` before Vite, so TypeScript errors fail the build. `go test ./...` covers commands (including large-directory caps), the application catalog, encrypted config/history/notes with corrupt-file recovery, persona migration and autonomy normalization, Russian and English intents (including reminders, game intents, full URLs and search-style weather phrases), reminder persistence and corrupt-file recovery, path safety, sanitization, the Ollama client, setup recommendations, audit logging and retention, app routing, weather parsing and response-size limits, stored-coordinate forecasts, voice-history sanitization, transcript hallucination filtering, microphone diagnostics, browser URL safety and egress-proxy rejection, authenticated IPC delivery and tamper rejection, app/agent mutex behavior, voice-engine checksum verification, and voice phrase/assets handling. Run `go test -race ./...` for the concurrency check.
+`npm run build` runs `vue-tsc --noEmit` before Vite, so TypeScript errors fail the build. `go test ./...` covers commands (including large-directory caps), the application catalog, encrypted config/history/notes with corrupt-file recovery, persona migration and autonomy normalization, Russian and English intents (including reminders, game intents, full URLs and search-style weather phrases), reminder persistence and corrupt-file recovery, path safety, sanitization, the Ollama client, setup recommendations, audit logging and retention, app routing, weather parsing and response-size limits, stored-coordinate forecasts, voice-history sanitization, transcript hallucination filtering, microphone diagnostics, browser URL safety and egress-proxy rejection, direct-request public-address validation, authenticated IPC delivery and tamper rejection, app/agent mutex behavior, voice-engine checksum verification, and voice phrase/assets handling. Run `go test -race ./...` for the concurrency check.
 
 Hardware and network checks are opt-in with the `manual` build tag, for example:
 

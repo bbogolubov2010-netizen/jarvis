@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -309,6 +310,11 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.loadHistory()
 
+	// Screenshots and generated images are deleted once the UI has read them.
+	// Remove orphans left by a crash or by a UI call that never happened.
+	pruneImageDir(filepath.Join(os.TempDir(), "jarvis_screenshots"))
+	pruneImageDir(filepath.Join(os.TempDir(), "jarvis_images"))
+
 	if alloc, cancel, err := browser.NewAllocator(); err != nil {
 		fmt.Fprintf(os.Stderr, "browser allocator: %v\n", err)
 	} else {
@@ -407,7 +413,9 @@ func (a *App) shutdown(ctx context.Context) {
 		a.voiceCancel()
 	}
 	a.cancelAllStreams()
-	a.streamWG.Wait()
+	if !waitForStreams(&a.streamWG, streamShutdownTimeout) {
+		fmt.Fprintln(os.Stderr, "shutdown: timed out waiting for chat streams")
+	}
 	if a.voice != nil {
 		a.voice.Stop()
 	}
@@ -426,6 +434,25 @@ func (a *App) shutdown(ctx context.Context) {
 	audit.Close()
 	if a.browserCancel != nil {
 		a.browserCancel()
+	}
+}
+
+// streamShutdownTimeout bounds how long exit waits for in-flight model
+// requests. A stalled Ollama connection must not keep the process alive.
+const streamShutdownTimeout = 5 * time.Second
+
+// waitForStreams waits for wg and reports false if the timeout expires first.
+func waitForStreams(wg *sync.WaitGroup, timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
 	}
 }
 
@@ -1612,11 +1639,60 @@ func writeFileAtomic(path string, data []byte) error {
 	return nil
 }
 
+const (
+	// imageRetention bounds how long a capture may wait for the UI to read it.
+	imageRetention = time.Hour
+	// maxRetainedImages caps disk use even when many captures are made in one
+	// hour. The UI normally removes each file as soon as it is read.
+	maxRetainedImages = 40
+)
+
+// pruneImageDir removes stale screenshots and generated images. Files newer
+// than imageRetention are kept so an in-flight UI read cannot lose its file.
+func pruneImageDir(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	type retained struct {
+		path    string
+		modTime time.Time
+	}
+	files := make([]retained, 0, len(entries))
+	cutoff := time.Now().Add(-imageRetention)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(path)
+			continue
+		}
+		files = append(files, retained{path: path, modTime: info.ModTime()})
+	}
+
+	excess := len(files) - maxRetainedImages
+	if excess <= 0 {
+		return
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].modTime.Before(files[j].modTime) })
+	for _, file := range files[:excess] {
+		_ = os.Remove(file.path)
+	}
+}
+
 func (a *App) takeScreenshotPath() (string, error) {
 	dir := filepath.Join(os.TempDir(), "jarvis_screenshots")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create screenshot directory: %w", err)
 	}
+	pruneImageDir(dir)
 	path := filepath.Join(dir, "screen_"+time.Now().Format("20060102_150405.000")+".png")
 
 	script := fmt.Sprintf(

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"Jarvis/internal/jobobject"
+	"Jarvis/internal/netguard"
 	"Jarvis/internal/sanitize"
 
 	"github.com/chromedp/chromedp"
@@ -101,65 +102,11 @@ func assignChildProcesses() error {
 // this check a malicious result could make the headless browser read a local
 // service and feed its response to the model.
 func safePublicURL(ctx context.Context, raw string) bool {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || parsed.Hostname() == "" || parsed.User != nil {
-		return false
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return false
-	}
-	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
-	if isLocalHostname(host) {
-		return false
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return publicIP(ip)
-	}
-	lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	addresses, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)
-	if err != nil || len(addresses) == 0 {
-		return false
-	}
-	for _, address := range addresses {
-		if !publicIP(address.IP) {
-			return false
-		}
-	}
-	return true
+	return netguard.IsPublicURL(ctx, raw)
 }
 
 func publicIP(ip net.IP) bool {
-	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
-		ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-		return false
-	}
-	if ip4 := ip.To4(); ip4 != nil {
-		// Reject special-purpose and documentation ranges in addition to the
-		// standard private ranges handled by net.IP.IsPrivate.
-		if ip4[0] == 0 || ip4[0] >= 224 {
-			return false
-		}
-		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
-			return false // carrier-grade NAT
-		}
-		if ip4[0] == 192 && ip4[1] == 0 && (ip4[2] == 0 || ip4[2] == 2) {
-			return false // IETF protocol assignments / TEST-NET-1
-		}
-		if ip4[0] == 198 && (ip4[1] == 18 || ip4[1] == 19) {
-			return false // benchmarking
-		}
-		if ip4[0] == 198 && ip4[1] == 51 && ip4[2] == 100 {
-			return false // TEST-NET-2
-		}
-		if ip4[0] == 203 && ip4[1] == 0 && ip4[2] == 113 {
-			return false // TEST-NET-3
-		}
-	}
-	return true
+	return netguard.IsPublicIP(ip)
 }
 
 func SmartSearch(ctx context.Context, allocCtx context.Context, query string) ([]SearchResult, string, error) {

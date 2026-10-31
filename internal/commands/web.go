@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/net/html"
+
+	"Jarvis/internal/netguard"
 )
 
 type SearchResult struct {
@@ -108,7 +110,7 @@ func getInstantAnswer(query string) string {
 func getInstantAnswerContext(ctx context.Context, query string) string {
 	apiURL := fmt.Sprintf("https://api.duckduckgo.com/?q=%s&format=json&no_html=1&skip_disambig=1", url.QueryEscape(query))
 
-	client := &http.Client{Timeout: 8 * time.Second}
+	client := netguard.NewClient(8 * time.Second)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
 		return ""
@@ -118,7 +120,7 @@ func getInstantAnswerContext(ctx context.Context, query string) string {
 		return ""
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return ""
 	}
 
@@ -162,7 +164,7 @@ func searchHTML(query string) []SearchResult {
 }
 
 func searchHTMLContext(ctx context.Context, query string) []SearchResult {
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := netguard.NewClient(15 * time.Second)
 	form := url.Values{"q": {query}}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://html.duckduckgo.com/html/", strings.NewReader(form.Encode()))
@@ -181,7 +183,7 @@ func searchHTMLContext(ctx context.Context, query string) []SearchResult {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil
 	}
 

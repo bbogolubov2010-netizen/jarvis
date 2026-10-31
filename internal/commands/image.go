@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"Jarvis/internal/netguard"
 )
 
 const (
@@ -83,7 +85,7 @@ func GenerateImageContext(ctx context.Context, prompt, size string) string {
 		"https://image.pollinations.ai/prompt/%s?width=%d&height=%d&nologo=true",
 		urlEncode(prompt), width, height,
 	)
-	client := &http.Client{Timeout: imageRequestTimeout}
+	client := netguard.NewClient(imageRequestTimeout)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return fmt.Sprintf("Image generation failed: %s", err)

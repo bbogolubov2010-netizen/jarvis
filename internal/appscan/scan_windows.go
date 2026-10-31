@@ -360,12 +360,81 @@ func cleanName(name string) string {
 	return strings.TrimSpace(name)
 }
 
-// splitArgs parses a shortcut argument string into fields. Shortcut arguments
-// are rarely quoted in a way that matters here; an empty value returns nil.
+// splitArgs parses a Windows shortcut argument string using the same rules as
+// CommandLineToArgvW: double quotes group text, backslashes are literal unless
+// they precede a quote, and a doubled quote inside a quoted argument is an
+// escaped quote. The previous implementation used strings.Fields, which broke
+// every shortcut whose arguments contained a quoted path.
 func splitArgs(raw string) []string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil
 	}
-	return strings.Fields(raw)
+
+	var (
+		args    []string
+		current strings.Builder
+		quoted  bool
+		started bool
+	)
+
+	flush := func() {
+		if !started {
+			return
+		}
+		args = append(args, current.String())
+		current.Reset()
+		started = false
+	}
+
+	for i := 0; i < len(raw); {
+		switch c := raw[i]; c {
+		case ' ', '\t':
+			if quoted {
+				current.WriteByte(c)
+				started = true
+				i++
+				continue
+			}
+			flush()
+			i++
+		case '"':
+			if quoted && i+1 < len(raw) && raw[i+1] == '"' {
+				current.WriteByte('"')
+				started = true
+				i += 2
+				continue
+			}
+			quoted = !quoted
+			started = true
+			i++
+		case '\\':
+			end := i
+			for end < len(raw) && raw[end] == '\\' {
+				end++
+			}
+			count := end - i
+			if end < len(raw) && raw[end] == '"' {
+				current.WriteString(strings.Repeat(`\`, count/2))
+				started = true
+				if count%2 == 1 {
+					// Odd count: the quote is escaped and stays literal.
+					current.WriteByte('"')
+				} else {
+					quoted = !quoted
+				}
+				i = end + 1
+				continue
+			}
+			current.WriteString(strings.Repeat(`\`, count))
+			started = true
+			i = end
+		default:
+			current.WriteByte(c)
+			started = true
+			i++
+		}
+	}
+	flush()
+	return args
 }

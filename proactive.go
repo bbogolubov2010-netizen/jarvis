@@ -44,7 +44,13 @@ func (a *App) scheduleBriefing() {
 	a.proactiveMu.Unlock()
 
 	go func() {
-		time.Sleep(6 * time.Second)
+		timer := time.NewTimer(6 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-a.voiceCtx.Done():
+			return
+		case <-timer.C:
+		}
 		a.deliverBriefingIfVisible()
 	}()
 }

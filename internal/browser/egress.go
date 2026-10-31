@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"Jarvis/internal/netguard"
+
 	"github.com/chromedp/chromedp"
 )
 
@@ -225,61 +227,11 @@ func (p *egressProxy) dialContext(ctx context.Context, network, address string) 
 }
 
 func (p *egressProxy) dialResolved(ctx context.Context, host, port string) (net.Conn, error) {
-	addresses, err := resolvePublicHost(ctx, host)
-	if err != nil {
-		return nil, err
-	}
-
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	var lastErr error
-	for _, ip := range addresses {
-		conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
-		if err == nil {
-			return conn, nil
-		}
-		lastErr = err
-	}
-	if lastErr == nil {
-		lastErr = errors.New("no public address")
-	}
-	return nil, lastErr
+	return netguard.DialHostPort(ctx, host, port)
 }
 
 func resolvePublicHost(ctx context.Context, host string) ([]net.IP, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-	if host == "" || isLocalHostname(host) {
-		return nil, errors.New("local hostname")
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if !publicIP(ip) {
-			return nil, errors.New("private address")
-		}
-		return []net.IP{ip}, nil
-	}
-
-	lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	addresses, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)
-	if err != nil || len(addresses) == 0 {
-		return nil, fmt.Errorf("resolve %q: %w", host, err)
-	}
-	ips := make([]net.IP, 0, len(addresses))
-	for _, address := range addresses {
-		if !publicIP(address.IP) {
-			return nil, fmt.Errorf("resolve %q: non-public address", host)
-		}
-		ips = append(ips, address.IP)
-	}
-	return ips, nil
-}
-
-func isLocalHostname(host string) bool {
-	return host == "localhost" || strings.HasSuffix(host, ".localhost") ||
-		strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") ||
-		strings.HasSuffix(host, ".lan") || strings.HasSuffix(host, ".home")
+	return netguard.ResolvePublicHost(ctx, host)
 }
 
 func splitTarget(target, defaultPort string) (string, string, error) {
