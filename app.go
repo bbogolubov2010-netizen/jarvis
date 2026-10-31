@@ -20,25 +20,28 @@ import (
 	"time"
 
 	"Jarvis/internal/applock"
+	"Jarvis/internal/appscan"
 	"Jarvis/internal/audit"
 	"Jarvis/internal/autostart"
 	"Jarvis/internal/browser"
 	"Jarvis/internal/commands"
 	"Jarvis/internal/config"
 	"Jarvis/internal/dpapi"
+	"Jarvis/internal/gamewatch"
 	"Jarvis/internal/hotkey"
 	"Jarvis/internal/intent"
 	"Jarvis/internal/ipc"
 	"Jarvis/internal/ollama"
+	"Jarvis/internal/reminders"
 	"Jarvis/internal/safepath"
 	"Jarvis/internal/sanitize"
 	"Jarvis/internal/setup"
 	"Jarvis/internal/tray"
-	"Jarvis/internal/tts"
 	"Jarvis/internal/voice"
 	"Jarvis/internal/voiceengine"
 	"Jarvis/internal/voiceinput"
 	"Jarvis/internal/weather"
+	"Jarvis/internal/winwindow"
 
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -62,6 +65,9 @@ const (
 	eventChatError    = "chat:error"
 	eventChatCanceled = "chat:canceled"
 )
+
+// windowTitle must stay in sync with options.App.Title in main.go.
+const windowTitle = "JARVIS - AI Assistant"
 
 var modelNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
 
@@ -136,7 +142,6 @@ type App struct {
 	voiceCommandCtx     context.Context
 	voiceCommandStop    context.CancelFunc
 	voiceCommandRun     sync.Mutex
-	tts                 *tts.Speaker
 	weather             *weather.Client
 	voicePaths          voiceengine.Paths
 	voiceEngineError    string
@@ -160,6 +165,18 @@ type App struct {
 	browserMu     sync.Mutex
 	browserAlloc  context.Context
 	browserCancel context.CancelFunc
+
+	reminders  *reminders.Store
+	game       *gamewatch.Watcher
+	gameMu     sync.Mutex
+	gameStatus gamewatch.Status
+	gameAsked  map[string]bool
+
+	proactiveMu       sync.Mutex
+	briefingPending   bool
+	briefingDelivered bool
+	watchdogDelivered bool
+	lastProactive     time.Time
 }
 
 // NewApp loads configuration and prepares dependencies.
@@ -318,6 +335,17 @@ func (a *App) startup(ctx context.Context) {
 	if err := commands.InitNotes(filepath.Join(a.GetConfigDir(), "notes.json")); err != nil {
 		fmt.Fprintf(os.Stderr, "notes: %v\n", err)
 	}
+	if store, err := reminders.New(filepath.Join(a.GetConfigDir(), "reminders.json")); err != nil {
+		fmt.Fprintf(os.Stderr, "reminders: %v\n", err)
+	} else {
+		a.reminders = store
+	}
+	if watcher, err := gamewatch.New(filepath.Join(a.GetConfigDir(), "games.json")); err != nil {
+		fmt.Fprintf(os.Stderr, "game watch: %v\n", err)
+	} else {
+		a.game = watcher
+	}
+	a.gameAsked = make(map[string]bool)
 	a.voice = voice.NewPlayer(a.voiceDirs(), a.voiceEnabled)
 	if err := voice.EnsureAssets(a.voiceDir(), a.voiceSourceDirs()); err != nil {
 		fmt.Fprintf(os.Stderr, "voice: %v\n", err)
@@ -326,8 +354,6 @@ func (a *App) startup(ctx context.Context) {
 	if err := a.verifyVoiceEngine(paths); err != nil {
 		fmt.Fprintf(os.Stderr, "voice engine integrity: %v\n", err)
 	}
-	a.tts = tts.New(paths.PiperExe, paths.PiperModel, paths.PiperConfig, a.voiceTTSEnabled)
-
 	if a.visible {
 		greeting := voice.KeyGreeting
 		if hour := time.Now().Hour(); hour >= 5 && hour < 12 {
@@ -357,14 +383,23 @@ func (a *App) startup(ctx context.Context) {
 
 	a.syncAutoStart()
 	go tray.Run(a.getTrayCallbacks())
+	go func() {
+		if err := appscan.RefreshIfStale(context.Background(), 24*time.Hour); err != nil {
+			fmt.Fprintf(os.Stderr, "app scan: %v\n", err)
+			return
+		}
+		a.emitEvent("apps:updated", map[string]any{"count": len(appscan.Cached().Apps)})
+	}()
 
 	if !a.voiceInputDisabled() {
-		go func() { _ = a.startVoiceInput() }()
+		go a.startVoiceInputWithRetry()
 	}
 	if a.pendingVoiceWake {
 		a.pendingVoiceWake = false
 		go a.pushToTalkWhenReady()
 	}
+	go a.startProactiveLoop()
+	a.scheduleBriefing()
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -373,11 +408,6 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 	a.cancelAllStreams()
 	a.streamWG.Wait()
-	// Cancel speech before joining the voice manager: a command handler may be
-	// blocked inside TTS, and the manager waits for that handler to finish.
-	if a.tts != nil {
-		a.tts.Stop()
-	}
 	if a.voice != nil {
 		a.voice.Stop()
 	}
@@ -415,6 +445,58 @@ func (a *App) showWindowSilent() {
 	wruntime.WindowShow(a.ctx)
 	wruntime.WindowUnminimise(a.ctx)
 	a.visible = true
+
+	// A hidden autostart launch must not consume the first-run tip. Deliver it
+	// the first time the window actually becomes visible instead.
+	if tip, ok := a.pendingOnboardingTipLocked(); ok {
+		if err := a.markOnboardingShown(); err == nil {
+			a.emitEvent("onboarding:tip", map[string]any{"content": tip})
+		}
+	}
+	go a.deliverBriefingIfVisible()
+}
+
+const onboardingTip = "Сэр, все системы в норме. Я работаю на полную мощность: открываю любые приложения, " +
+	"считаю погоду, ищу в сети и анализирую экран — с вашего разрешения. Осталось подключить голос: " +
+	"включите микрофон и скажите «Привет, Джарвис» или «Hey Jarvis» — я понимаю оба языка. " +
+	"Без микрофона я тоже рядом: напишите здесь или нажмите Ctrl+Shift+J."
+
+// GetOnboardingTip returns the first-launch tip once and marks it as delivered.
+// It returns an empty string while the window is hidden or after the tip has
+// already been shown.
+func (a *App) GetOnboardingTip() string {
+	tip, ok := a.pendingOnboardingTip()
+	if !ok {
+		return ""
+	}
+	if err := a.markOnboardingShown(); err != nil {
+		return ""
+	}
+	return tip
+}
+
+func (a *App) pendingOnboardingTip() (string, bool) {
+	a.visibleMu.Lock()
+	defer a.visibleMu.Unlock()
+	return a.pendingOnboardingTipLocked()
+}
+
+// pendingOnboardingTipLocked requires visibleMu.
+func (a *App) pendingOnboardingTipLocked() (string, bool) {
+	if !a.windowIsVisible() {
+		return "", false
+	}
+	a.stateMu.RLock()
+	shown := a.settings.OnboardingShown
+	a.stateMu.RUnlock()
+	if shown {
+		return "", false
+	}
+	return onboardingTip, true
+}
+
+func (a *App) markOnboardingShown() error {
+	return a.updateVoiceSettings(func(s *config.Settings) { s.OnboardingShown = true })
 }
 
 func (a *App) toggleWindow() {
@@ -423,7 +505,7 @@ func (a *App) toggleWindow() {
 	a.visibleMu.Lock()
 	defer a.visibleMu.Unlock()
 
-	if a.visible {
+	if a.windowIsVisible() {
 		if wruntime.WindowIsMinimised(a.ctx) {
 			wruntime.WindowUnminimise(a.ctx)
 			wruntime.WindowShow(a.ctx)
@@ -439,6 +521,26 @@ func (a *App) toggleWindow() {
 	wruntime.WindowUnminimise(a.ctx)
 	a.visible = true
 	a.playVoice(voice.KeyAtYourService)
+	if tip, ok := a.pendingOnboardingTipLocked(); ok {
+		if err := a.markOnboardingShown(); err == nil {
+			a.emitEvent("onboarding:tip", map[string]any{"content": tip})
+		}
+	}
+	go a.deliverBriefingIfVisible()
+}
+
+// windowIsVisible reads the real window state. The cached visible flag can
+// drift when the close button hides the window through Wails.
+func (a *App) windowIsVisible() bool {
+	if a.ctx == nil {
+		return a.visible
+	}
+	select {
+	case <-a.ctxReady:
+	default:
+		return a.visible
+	}
+	return winwindow.IsVisible(windowTitle)
 }
 
 // StatusInfo describes the assistant state for the UI.
@@ -551,6 +653,11 @@ func (a *App) routeInput(text string) routedInput {
 			a.playVoice(voice.KeyUnclear)
 			return routedInput{handled: true, direct: "Usage: /open <appname> - opens an application."}
 		}
+		if a.autonomyLevel() == "trusted" {
+			audit.LogCommand("/open", name)
+			a.playVoice(voice.KeyLoading)
+			return routedInput{handled: true, direct: commands.LaunchByName(name)}
+		}
 		a.intents.Set(intent.OpenApp, name)
 		a.playVoice(voice.KeyAck)
 		return routedInput{handled: true, direct: fmt.Sprintf("Sir, may I open %s? Type YES to confirm.", name)}
@@ -588,7 +695,23 @@ func (a *App) routeInput(text string) routedInput {
 			a.intents.Set(intent.Restart, "")
 			a.playVoice(voice.KeyAck)
 			return routedInput{handled: true, direct: "Are you sure you want to restart? Type YES to confirm."}
+		case commands.ResultListReminders:
+			return routedInput{handled: true, direct: a.listReminders()}
 		default:
+			if strings.HasPrefix(result, commands.ResultRemindPrefix) {
+				args := strings.TrimSpace(strings.TrimPrefix(result, commands.ResultRemindPrefix))
+				a.playVoice(voice.KeyAck)
+				return routedInput{handled: true, direct: a.handleRemindCommand(args)}
+			}
+			if strings.HasPrefix(result, commands.ResultTimerPrefix) {
+				args := strings.TrimSpace(strings.TrimPrefix(result, commands.ResultTimerPrefix))
+				a.playVoice(voice.KeyAck)
+				return routedInput{handled: true, direct: a.handleTimerCommand(args)}
+			}
+			if strings.HasPrefix(result, commands.ResultGamePrefix) {
+				args := strings.TrimSpace(strings.TrimPrefix(result, commands.ResultGamePrefix))
+				return routedInput{handled: true, direct: a.handleGameCommand(args)}
+			}
 			audit.LogCommand(commandName(text), "")
 			a.playVoice(voiceForCommand(text, result))
 			return routedInput{handled: true, direct: result}
@@ -1067,6 +1190,12 @@ func (a *App) SaveSettings(settings config.Settings) error {
 	// entry. Preserve it when the settings form is saved.
 	settings.AutoStart = previous.AutoStart
 	settings.AutoStartConfigured = previous.AutoStartConfigured
+	// Track whether the persona was edited so future upgrades do not overwrite
+	// a custom prompt.
+	settings.SystemPromptCustomized = strings.TrimSpace(settings.SystemPrompt) != strings.TrimSpace(config.DefaultSystemPrompt())
+	// The onboarding flag is owned by the backend; a settings form must not
+	// resurrect a tip that was already delivered.
+	settings.OnboardingShown = previous.OnboardingShown
 	if err := a.ollama.SetBaseURL(settings.OllamaURL); err != nil {
 		a.playVoice(voice.KeyError)
 		return err
@@ -1667,9 +1796,9 @@ func (a *App) PullModel(modelName string) (string, error) {
 	return fmt.Sprintf("Model %s installed successfully.", modelName), nil
 }
 
-// SetAutoStart enables or disables starting JARVIS at logon. With voice input
-// enabled the logon entry is the lightweight wake-word agent; otherwise it
-// starts the hidden main window as before.
+// SetAutoStart enables or disables starting JARVIS at logon. JARVIS always
+// starts as the full application with the window hidden in the tray, so the
+// wake word, the global hotkey and the tray icon work immediately.
 func (a *App) SetAutoStart(enabled bool) bool {
 	// Serialize with SaveSettings so the registry change and the persisted
 	// preference cannot overwrite each other.
@@ -1678,11 +1807,7 @@ func (a *App) SetAutoStart(enabled bool) bool {
 
 	var err error
 	if enabled {
-		if a.useVoiceAgent() {
-			err = autostart.EnableAgent()
-		} else {
-			err = autostart.Enable()
-		}
+		err = autostart.Enable()
 	} else {
 		err = autostart.Disable()
 	}
@@ -1712,13 +1837,9 @@ func (a *App) SetAutoStart(enabled bool) bool {
 	return true
 }
 
-func (a *App) useVoiceAgent() bool {
-	settings := a.GetSettings()
-	return !settings.VoiceInputDisabled && !settings.WakeWordDisabled && !settings.VoiceAgentDisabled
-}
-
-// syncAutoStart repairs a stale Run entry and switches an existing entry
-// between hidden-window and supervised-agent mode after settings change.
+// syncAutoStart repairs a stale Run entry and migrates legacy agent entries to
+// the full hidden application, which keeps the tray icon and hotkey available
+// from logon.
 func (a *App) syncAutoStart() {
 	settings := a.GetSettings()
 	if settings.AutoStartConfigured && !settings.AutoStart {
@@ -1733,18 +1854,15 @@ func (a *App) syncAutoStart() {
 		return
 	}
 
-	if a.useVoiceAgent() {
-		if !autostart.IsAgentSupervisorEnabled() {
-			if err := autostart.EnableAgent(); err != nil {
-				fmt.Fprintf(os.Stderr, "repair autostart agent: %v\n", err)
-			}
-		}
-		return
-	}
 	if !autostart.IsHiddenEnabled() {
 		if err := autostart.Enable(); err != nil {
 			fmt.Fprintf(os.Stderr, "repair autostart hidden: %v\n", err)
+			return
 		}
+	}
+	// A stale StartupApproved flag silently disables a correct Run entry.
+	if err := autostart.ClearStartupApproval(); err != nil {
+		fmt.Fprintf(os.Stderr, "clear startup approval: %v\n", err)
 	}
 }
 
@@ -1753,14 +1871,78 @@ func (a *App) IsAutoStart() bool {
 	return autostart.IsEnabled()
 }
 
+// GetAutoStartStatus returns a diagnostic snapshot for the Settings screen.
+func (a *App) GetAutoStartStatus() autostart.Status {
+	return autostart.Inspect()
+}
+
+// TestAutoStart starts the same executable with a headless self-check flag and
+// verifies that it wrote the marker file. It proves that Windows can launch the
+// binary without disturbing the running instance.
+func (a *App) TestAutoStart() (bool, string) {
+	executable, err := os.Executable()
+	if err != nil {
+		return false, "Could not locate the JARVIS executable: " + err.Error()
+	}
+	marker := autostartCheckPath()
+	_ = os.Remove(marker)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, executable, "--autostart-check")
+	if output, err := command.CombinedOutput(); err != nil {
+		return false, fmt.Sprintf("The test process failed: %v %s", err, strings.TrimSpace(string(output)))
+	}
+	if _, err := os.Stat(marker); err != nil {
+		return false, "The test process started but did not confirm readiness."
+	}
+	return true, "Autostart works: JARVIS started hidden and confirmed readiness."
+}
+
+func autostartCheckPath() string {
+	return filepath.Join(configDirPath(), "autostart-check.txt")
+}
+
 // CheckOllamaInstalled reports whether Ollama is installed.
 func (a *App) CheckOllamaInstalled() bool {
 	return setup.OllamaInstalled()
 }
 
-// GetInstalledApps lists detected desktop applications.
+// GetInstalledApps returns the curated quick-access list shown in the sidebar.
+// The full scanned catalog stays in memory for /apps and LaunchByName; it is
+// intentionally not exposed here so the sidebar does not grow to hundreds of
+// entries.
 func (a *App) GetInstalledApps() []commands.InstalledApp {
 	return commands.DetectApps()
+}
+
+// GetCatalogStatus reports the in-memory application catalog size and when it
+// was last refreshed. The sidebar no longer displays the catalog, but Settings
+// still exposes a RESCAN control.
+func (a *App) GetCatalogStatus() CatalogStatus {
+	catalog := appscan.Cached()
+	return CatalogStatus{
+		Count:     len(catalog.Apps),
+		UpdatedAt: catalog.ScannedAt.UnixMilli(),
+	}
+}
+
+// CatalogStatus is the Settings-screen snapshot of the application catalog.
+type CatalogStatus struct {
+	Count     int   `json:"count"`
+	UpdatedAt int64 `json:"updated_at"`
+}
+
+// ScanApplications rescans the machine and returns the catalog size. The scan
+// is bounded and may take a few seconds on large installations.
+func (a *App) ScanApplications() (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	catalog, err := appscan.Refresh(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return len(catalog.Apps), nil
 }
 
 // LaunchApp starts a detected application by name.

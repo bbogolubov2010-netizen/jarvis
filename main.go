@@ -4,6 +4,7 @@ import (
 	"embed"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -32,6 +33,11 @@ func main() {
 			voiceSupervisor = true
 		case "--voice-wake":
 			voiceWake = true
+		case "--autostart-check":
+			// Used by the Settings "Test" button to prove that Windows can
+			// start this executable. It must not create a second instance.
+			writeAutostartCheckMarker()
+			return
 		case "--voice-command-b64":
 			// Removed: commands are delivered over authenticated IPC so they
 			// never appear in a process command line. Ignore the legacy flag.
@@ -51,7 +57,7 @@ func main() {
 	app.pendingVoiceWake = voiceWake
 
 	err := wails.Run(&options.App{
-		Title:             "JARVIS - AI Assistant",
+		Title:             windowTitle,
 		Width:             1280,
 		Height:            800,
 		MinWidth:          900,
@@ -61,7 +67,7 @@ func main() {
 		DisableResize:     false,
 		Frameless:         false,
 		StartHidden:       startHidden,
-		HideWindowOnClose: false,
+		HideWindowOnClose: true,
 		BackgroundColour:  &options.RGBA{R: 10, G: 14, B: 26, A: 255},
 		AssetServer: &assetserver.Options{
 			Assets: assets,
@@ -96,5 +102,18 @@ func main() {
 			0x00000010, // MB_ICONERROR
 		)
 		os.Exit(1)
+	}
+}
+
+// writeAutostartCheckMarker records a successful headless start so the
+// Settings "Test" button can confirm the Run entry works.
+func writeAutostartCheckMarker() {
+	if err := os.MkdirAll(configDirPath(), 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "autostart check: %v\n", err)
+		return
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := os.WriteFile(autostartCheckPath(), []byte(stamp), 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "autostart check: %v\n", err)
 	}
 }

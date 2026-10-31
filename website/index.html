@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JARVIS — Your AI Desktop Commander</title>
+  <meta name="description" content="JARVIS is an open-source Windows desktop assistant. Local AI inference through Ollama, screen analysis, system and file commands, plus optional web search and image generation.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Orbitron:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link href="https://unpkg.com/aos@2.3.1/dist/aos.css" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/aos@2.3.1/dist/aos.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Inter', 'sans-serif'], orbitron: ['Orbitron', 'monospace'] },
+          colors: {
+            cyan: { 400: '#00d4ff', 500: '#00bfff', 600: '#0066ff' },
+            dark: { 900: '#0a0e1a', 800: '#111827', 700: '#1a1f2e' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0e1a; color: #e5e7eb; font-family: 'Inter', sans-serif; overflow-x: hidden; }
+
+    .arc-reactor { position: relative; width: 120px; height: 120px; }
+    .arc-reactor svg { width: 100%; height: 100%; animation: pulse-glow 3s ease-in-out infinite; }
+    @keyframes pulse-glow {
+      0%, 100% { filter: drop-shadow(0 0 10px rgba(0,212,255,0.3)); }
+      50% { filter: drop-shadow(0 0 25px rgba(0,212,255,0.6)); }
+    }
+    .ring-rotate { animation: spin 12s linear infinite; transform-origin: center; }
+    .ring-rotate-reverse { animation: spin-reverse 8s linear infinite; transform-origin: center; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes spin-reverse { to { transform: rotate(-360deg); } }
+
+    .glass { background: rgba(255,255,255,0.03); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid rgba(0,212,255,0.08); }
+    .glass-strong { background: rgba(255,255,255,0.05); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); border: 1px solid rgba(0,212,255,0.12); }
+
+    .gradient-text { background: linear-gradient(135deg, #00d4ff, #0066ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+
+    .neon-border { border: 1px solid rgba(0,212,255,0.15); transition: border-color 0.3s; }
+    .neon-border:hover { border-color: rgba(0,212,255,0.4); }
+
+    .glow-card { position: relative; overflow: hidden; transition: transform 0.3s, box-shadow 0.3s; }
+    .glow-card::before { content: ''; position: absolute; inset: 0; border-radius: inherit; padding: 1px; background: linear-gradient(135deg, rgba(0,212,255,0.2), transparent, rgba(0,212,255,0.1)); -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0); -webkit-mask-composite: xor; mask-composite: exclude; pointer-events: none; opacity: 0; transition: opacity 0.4s; }
+    .glow-card:hover::before { opacity: 1; }
+    .glow-card:hover { transform: translateY(-4px); box-shadow: 0 8px 40px rgba(0,212,255,0.1); }
+
+    .hero-bg { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+    .hero-bg .orb { position: absolute; border-radius: 50%; filter: blur(80px); opacity: 0.15; }
+    .hero-bg .orb:nth-child(1) { width: 600px; height: 600px; background: #0066ff; top: -200px; left: -200px; animation: float-orb 12s ease-in-out infinite; }
+    .hero-bg .orb:nth-child(2) { width: 400px; height: 400px; background: #00d4ff; bottom: -100px; right: -100px; animation: float-orb 10s ease-in-out infinite reverse; }
+    .hero-bg .orb:nth-child(3) { width: 300px; height: 300px; background: #0044ff; top: 30%; right: 20%; animation: float-orb 14s ease-in-out infinite 2s; }
+    @keyframes float-orb { 0%, 100% { transform: translate(0, 0); } 50% { transform: translate(40px, -40px); } }
+
+    .grid-pattern { background-image: radial-gradient(rgba(0,212,255,0.06) 1px, transparent 1px); background-size: 40px 40px; }
+
+    .btn-primary { background: linear-gradient(135deg, #0066ff, #00d4ff); color: white; font-weight: 600; border: none; cursor: pointer; transition: all 0.3s; }
+    .btn-primary:hover { box-shadow: 0 0 30px rgba(0,212,255,0.3); transform: translateY(-2px); }
+    .btn-ghost { background: transparent; color: #00d4ff; border: 1px solid rgba(0,212,255,0.3); cursor: pointer; transition: all 0.3s; }
+    .btn-ghost:hover { background: rgba(0,212,255,0.1); border-color: #00d4ff; }
+
+    .stat-number { font-family: 'Orbitron', monospace; }
+    .timeline-dot { width: 16px; height: 16px; background: #00d4ff; border-radius: 50%; box-shadow: 0 0 12px rgba(0,212,255,0.5); }
+    .timeline-line { width: 2px; background: rgba(0,212,255,0.15); }
+
+    .feature-icon { width: 48px; height: 48px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; background: rgba(0,212,255,0.1); color: #00d4ff; transition: all 0.3s; }
+    .glow-card:hover .feature-icon { background: rgba(0,212,255,0.15); box-shadow: 0 0 20px rgba(0,212,255,0.15); }
+
+    .faq-q { cursor: pointer; transition: color 0.2s; }
+    .faq-q:hover { color: #00d4ff; }
+    .faq-a { max-height: 0; overflow: hidden; transition: max-height 0.3s ease; }
+    .faq-a.open { max-height: 200px; }
+
+    footer a { transition: color 0.2s; }
+    footer a:hover { color: #00d4ff; }
+
+    .scroll-indicator { position: absolute; bottom: 32px; left: 50%; transform: translateX(-50%); animation: bounce-down 2s infinite; }
+    @keyframes bounce-down { 0%, 100% { transform: translateX(-50%) translateY(0); } 50% { transform: translateX(-50%) translateY(8px); } }
+
+    .security-badge { display: inline-flex; align-items: center; gap: 6px; background: rgba(0,212,255,0.06); border: 1px solid rgba(0,212,255,0.1); border-radius: 20px; padding: 4px 14px; font-size: 0.75rem; color: #9ca3af; }
+
+    @media (max-width: 768px) {
+      .arc-reactor { width: 80px; height: 80px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- NAVBAR -->
+  <nav class="fixed top-0 left-0 right-0 z-50 glass" style="border-bottom:1px solid rgba(0,212,255,0.06)">
+    <div class="max-w-6xl mx-auto px-6 py-3 flex items-center justify-between">
+      <a href="#hero" class="flex items-center gap-2.5">
+        <svg viewBox="0 0 100 100" width="28" height="28" style="filter:drop-shadow(0 0 6px rgba(0,212,255,0.3))">
+          <circle cx="50" cy="50" r="48" fill="none" stroke="rgba(0,212,255,0.1)" stroke-width="1"/>
+          <circle cx="50" cy="50" r="44" fill="none" stroke="#00d4ff" stroke-width="2" stroke-dasharray="4 6" opacity="0.4"/>
+          <circle cx="50" cy="50" r="38" fill="none" stroke="#00bfff" stroke-width="2.5"/>
+          <circle cx="50" cy="50" r="30" fill="none" stroke="#0066ff" stroke-width="1.5" opacity="0.3"/>
+          <circle cx="50" cy="50" r="4" fill="#00d4ff" opacity="0.9"/>
+          <text x="50" y="58" text-anchor="middle" fill="#00d4ff" font-family="'Inter',sans-serif" font-size="36" font-weight="700">J</text>
+        </svg>
+        <span class="font-orbitron text-sm font-bold gradient-text tracking-widest">JARVIS</span>
+      </a>
+      <div class="hidden md:flex items-center gap-8 text-sm">
+        <a href="#features" class="text-gray-400 hover:text-white transition-colors">Features</a>
+        <a href="#security" class="text-gray-400 hover:text-white transition-colors">Security</a>
+        <a href="#how-it-works" class="text-gray-400 hover:text-white transition-colors">How It Works</a>
+        <a href="#pricing" class="text-gray-400 hover:text-white transition-colors">Pricing</a>
+        <a href="#faq" class="text-gray-400 hover:text-white transition-colors">FAQ</a>
+      </div>
+      <a href="#cta" class="btn-primary text-xs px-5 py-2 rounded-lg tracking-wider">GET STARTED</a>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <section id="hero" class="relative min-h-screen flex items-center justify-center overflow-hidden pt-20">
+    <div class="hero-bg"><div class="orb"></div><div class="orb"></div><div class="orb"></div></div>
+    <div class="grid-pattern absolute inset-0 opacity-50"></div>
+
+    <div class="relative z-10 text-center px-6 max-w-4xl mx-auto" data-aos="fade-up" data-aos-duration="1000">
+      <div class="flex justify-center mb-8">
+        <div class="arc-reactor">
+          <svg viewBox="0 0 100 100">
+            <circle cx="50" cy="50" r="48" fill="none" stroke="rgba(0,212,255,0.08)" stroke-width="0.8"/>
+            <circle class="ring-rotate" cx="50" cy="50" r="44" fill="none" stroke="rgba(0,212,255,0.15)" stroke-width="1.5" stroke-dasharray="4 8"/>
+            <circle class="ring-rotate-reverse" cx="50" cy="50" r="38" fill="none" stroke="rgba(0,212,255,0.3)" stroke-width="2" stroke-dasharray="6 10"/>
+            <circle cx="50" cy="50" r="30" fill="none" stroke="#0066ff" stroke-width="1.5" opacity="0.25"/>
+            <circle cx="50" cy="50" r="3.5" fill="#00d4ff" opacity="0.9"/>
+            <text x="50" y="58" text-anchor="middle" fill="#00d4ff" font-family="'Orbitron',monospace" font-size="38" font-weight="700">J</text>
+          </svg>
+        </div>
+      </div>
+
+      <span class="inline-block mb-4 security-badge"><i class="fas fa-shield-alt text-cyan-400 text-xs"></i> Local AI &middot; Open Source</span>
+
+      <h1 class="text-4xl md:text-6xl lg:text-7xl font-bold leading-tight">
+        Your AI<br>
+        <span class="gradient-text">Desktop Commander</span>
+      </h1>
+
+      <p class="text-gray-400 text-lg md:text-xl mt-5 max-w-2xl mx-auto leading-relaxed">
+        JARVIS is an open-source AI assistant for Windows. Chat, screen analysis, file and system
+        commands run through a local Ollama model. Optional web search and image generation use
+        online services, and the app tells you before they do.
+      </p>
+
+      <div class="flex flex-col sm:flex-row items-center justify-center gap-4 mt-10">
+        <a href="#how-it-works" class="btn-primary text-sm px-8 py-3.5 rounded-xl tracking-wider flex items-center gap-2">
+          <i class="fas fa-download"></i> Build from Source
+        </a>
+        <a href="#features" class="btn-ghost text-sm px-8 py-3.5 rounded-xl flex items-center gap-2">
+          <i class="fas fa-play-circle"></i> See Features
+        </a>
+      </div>
+
+      <div class="flex items-center justify-center gap-6 md:gap-10 mt-10 text-xs text-gray-600 flex-wrap">
+        <span><i class="fab fa-windows text-gray-500 mr-1.5"></i> Windows 10/11</span>
+        <span><i class="fas fa-microchip text-gray-500 mr-1.5"></i> Runs on Ollama</span>
+        <span><i class="fas fa-lock text-gray-500 mr-1.5"></i> No Telemetry</span>
+        <span><i class="fab fa-github text-gray-500 mr-1.5"></i> MIT Licensed</span>
+      </div>
+
+      <div class="scroll-indicator text-gray-600">
+        <i class="fas fa-chevron-down text-sm"></i>
+      </div>
+    </div>
+  </section>
+
+  <!-- FEATURES -->
+  <section id="features" class="relative py-20 md:py-28">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="text-center mb-16" data-aos="fade-up">
+        <span class="security-badge mb-4"><i class="fas fa-star text-cyan-400 text-xs"></i> Features</span>
+        <h2 class="text-3xl md:text-5xl font-bold">Why JARVIS?</h2>
+        <p class="text-gray-400 mt-3 max-w-xl mx-auto">JARVIS keeps AI inference on your machine, asks before risky actions, and states its network boundaries plainly.</p>
+      </div>
+
+      <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
+        <div class="glass glow-card rounded-2xl p-6 neon-border" data-aos="fade-up" data-aos-delay="0">
+          <div class="feature-icon mb-4"><i class="fas fa-microchip"></i></div>
+          <h3 class="font-semibold text-lg mb-2">Local AI Inference</h3>
+          <p class="text-gray-400 text-sm leading-relaxed">Powered by Ollama. Model inference runs on your hardware — no cloud AI service, no subscription, no API key.</p>
+        </div>
+
+        <div class="glass glow-card rounded-2xl p-6 neon-border" data-aos="fade-up" data-aos-delay="100">
+          <div class="feature-icon mb-4"><i class="fas fa-eye"></i></div>
+          <h3 class="font-semibold text-lg mb-2">Vision &amp; Screen Analysis</h3>
+          <p class="text-gray-400 text-sm leading-relaxed">Capture your screen and ask a question about it. Requires a vision-capable model such as llava; the screenshot stays on your machine.</p>
+        </div>
+
+        <div class="glass glow-card rounded-2xl p-6 neon-border" data-aos="fade-up" data-aos-delay="200">
+          <div class="feature-icon mb-4"><i class="fas fa-globe"></i></div>
+          <h3 class="font-semibold text-lg mb-2">Smart Web Search</h3>
+          <p class="text-gray-400 text-sm leading-relaxed">Ask JARVIS to research something. It sends the query to DuckDuckGo, reads the first result, and summarizes it. Available only when web search is enabled.</p>
+        </div>
+
+        <div class="glass glow-card rounded-2xl p-6 neon-border" data-aos="fade-up" data-aos-delay="0">
+          <div class="feature-icon mb-4"><i class="fas fa-terminal"></i></div>
+          <h3 class="font-semibold text-lg mb-2">System Automation</h3>
+          <p class="text-gray-400 text-sm leading-relaxed">Open detected apps, control volume, take screenshots, shut down, or restart. Screenshots, /open commands, shutdown, and restart require confirmation.</p>
+        </div>
+
+        <div class="glass glow-card rounded-2xl p-6 neon-border" data-aos="fade-up" data-aos-delay="100">
+          <div class="feature-icon mb-4"><i class="fas fa-palette"></i></div>
+          <h3 class="font-semibold text-lg mb-2">AI Image Generation</h3>
+          <p class="text-gray-400 text-sm leading-relaxed">Generate images from text descriptions through Pollinations.ai. This is an online service: your prompt leaves the machine.</p>
+        </div>
+
+        <div class="glass glow-card rounded-2xl p-6 neon-border" data-aos="fade-up" data-aos-delay="200">
+          <div class="feature-icon mb-4"><i class="fas fa-keyboard"></i></div>
+          <h3 class="font-semibold text-lg mb-2">Global Hotkey</h3>
+          <p class="text-gray-400 text-sm leading-relaxed">Press Ctrl+Shift+J from anywhere to show or hide JARVIS without leaving the current app.</p>
+        </div>
+
+        <div class="glass glow-card rounded-2xl p-6 neon-border" data-aos="fade-up" data-aos-delay="0">
+          <div class="feature-icon mb-4"><i class="fas fa-folder-open"></i></div>
+          <h3 class="font-semibold text-lg mb-2">File Management</h3>
+          <p class="text-gray-400 text-sm leading-relaxed">Create, read, write files and folders. JARVIS can organize your Desktop and Documents.</p>
+        </div>
+
+        <div class="glass glow-card rounded-2xl p-6 neon-border" data-aos="fade-up" data-aos-delay="100">
+          <div class="feature-icon mb-4"><i class="fas fa-sticky-note"></i></div>
+          <h3 class="font-semibold text-lg mb-2">In-Session and Saved Notes</h3>
+          <p class="text-gray-400 text-sm leading-relaxed">Save notes with /note and list them with /notes. Notes are stored as JSON in your JARVIS config folder.</p>
+        </div>
+
+        <div class="glass glow-card rounded-2xl p-6 neon-border" data-aos="fade-up" data-aos-delay="200">
+          <div class="feature-icon mb-4"><i class="fas fa-system-tray"></i></div>
+          <h3 class="font-semibold text-lg mb-2">System Tray Integration</h3>
+          <p class="text-gray-400 text-sm leading-relaxed">JARVIS lives in your system tray. Left-click toggles the window; right-click opens a menu with Show / Hide and Quit.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SECURITY -->
+  <section id="security" class="relative py-20 md:py-28">
+    <div class="absolute inset-0" style="background: radial-gradient(ellipse at 50% 50%, rgba(0,212,255,0.03), transparent 70%);"></div>
+    <div class="max-w-6xl mx-auto px-6 relative">
+      <div class="text-center mb-16" data-aos="fade-up">
+        <span class="security-badge mb-4"><i class="fas fa-shield-alt text-cyan-400 text-xs"></i> Security First</span>
+        <h2 class="text-3xl md:text-5xl font-bold">Local by Design</h2>
+        <p class="text-gray-400 mt-3 max-w-xl mx-auto">Practical safeguards, with the network boundaries stated plainly.</p>
+      </div>
+
+      <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div class="glass rounded-2xl p-5 neon-border text-center glow-card" data-aos="fade-up" data-aos-delay="0">
+          <div class="text-3xl mb-3 text-cyan-400"><i class="fas fa-lock"></i></div>
+          <h4 class="font-semibold text-sm mb-1">DPAPI Encryption</h4>
+          <p class="text-gray-500 text-xs">Settings are encrypted with Windows DPAPI for your user account.</p>
+        </div>
+        <div class="glass rounded-2xl p-5 neon-border text-center glow-card" data-aos="fade-up" data-aos-delay="100">
+          <div class="text-3xl mb-3 text-cyan-400"><i class="fas fa-ban"></i></div>
+          <h4 class="font-semibold text-sm mb-1">Confirmation for Actions</h4>
+          <p class="text-gray-500 text-xs">Screenshots, web search, shutdown, restart, and /open require an explicit YES. Clicking an app in the sidebar launches it directly. Web search and image generation use third-party services.</p>
+        </div>
+        <div class="glass rounded-2xl p-5 neon-border text-center glow-card" data-aos="fade-up" data-aos-delay="200">
+          <div class="text-3xl mb-3 text-cyan-400"><i class="fas fa-filter"></i></div>
+          <h4 class="font-semibold text-sm mb-1">Prompt Injection Shield</h4>
+          <p class="text-gray-500 text-xs">Web content is sanitized before it reaches the model and is treated as untrusted data. This reduces risk; it is not a guarantee.</p>
+        </div>
+        <div class="glass rounded-2xl p-5 neon-border text-center glow-card" data-aos="fade-up" data-aos-delay="300">
+          <div class="text-3xl mb-3 text-cyan-400"><i class="fas fa-clipboard-list"></i></div>
+          <h4 class="font-semibold text-sm mb-1">Local Audit Log</h4>
+          <p class="text-gray-500 text-xs">Commands, searches, and confirmations are logged locally. Type /audit to see recent entries.</p>
+        </div>
+      </div>
+
+      <div class="mt-12 glass rounded-2xl p-8 neon-border max-w-3xl mx-auto text-center" data-aos="fade-up">
+        <div class="flex flex-wrap items-center justify-center gap-4 text-sm text-gray-400">
+          <span><i class="fas fa-check-circle text-green-400 mr-1.5"></i> MIT Licensed</span>
+          <span><i class="fas fa-check-circle text-green-400 mr-1.5"></i> No Telemetry</span>
+          <span><i class="fas fa-check-circle text-green-400 mr-1.5"></i> No Account Required</span>
+          <span><i class="fas fa-check-circle text-green-400 mr-1.5"></i> No Analytics</span>
+          <span><i class="fas fa-check-circle text-green-400 mr-1.5"></i> Local Audit Log</span>
+        </div>
+        <p class="text-gray-600 text-xs mt-4">Search queries are sent to DuckDuckGo. Image prompts are sent to Pollinations.ai. Ollama runs locally.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- HOW IT WORKS -->
+  <section id="how-it-works" class="relative py-20 md:py-28">
+    <div class="max-w-5xl mx-auto px-6">
+      <div class="text-center mb-16" data-aos="fade-up">
+        <span class="security-badge mb-4"><i class="fas fa-cogs text-cyan-400 text-xs"></i> How It Works</span>
+        <h2 class="text-3xl md:text-5xl font-bold">From Source to Commander</h2>
+        <p class="text-gray-400 mt-3 max-w-xl mx-auto">JARVIS is not yet distributed as a signed installer. Build it from source in a few steps.</p>
+      </div>
+
+      <div class="relative">
+        <div class="timeline-line absolute left-6 md:left-1/2 top-0 bottom-0 -translate-x-1/2 hidden md:block"></div>
+
+        <div class="space-y-12 md:space-y-16">
+          <div class="flex items-start gap-6 md:gap-8 flex-col md:flex-row" data-aos="fade-right">
+            <div class="md:w-1/2 md:text-right order-2 md:order-1">
+              <h4 class="font-semibold text-lg">1. Install Ollama</h4>
+              <p class="text-gray-400 text-sm mt-1 leading-relaxed">Download Ollama from ollama.com and install it. The free, open-source model runner is the only heavy dependency.</p>
+            </div>
+            <div class="timeline-dot flex-shrink-0 z-10 order-1 md:order-2 mx-auto md:mx-0"></div>
+            <div class="md:w-1/2 order-3"></div>
+          </div>
+
+          <div class="flex items-start gap-6 md:gap-8 flex-col md:flex-row" data-aos="fade-left">
+            <div class="md:w-1/2"></div>
+            <div class="timeline-dot flex-shrink-0 z-10 order-1 md:order-1 mx-auto md:mx-0"></div>
+            <div class="md:w-1/2 order-2">
+              <h4 class="font-semibold text-lg">2. Pull a Model</h4>
+              <p class="text-gray-400 text-sm mt-1 leading-relaxed">JARVIS will detect your RAM and recommend the best model. One command installs it.</p>
+            </div>
+          </div>
+
+          <div class="flex items-start gap-6 md:gap-8 flex-col md:flex-row" data-aos="fade-right">
+            <div class="md:w-1/2 md:text-right order-2 md:order-1">
+              <h4 class="font-semibold text-lg">3. Build and Launch JARVIS</h4>
+              <p class="text-gray-400 text-sm mt-1 leading-relaxed">Install Go, Node.js, and the Wails CLI, then follow the README. The app appears in your system tray; press Ctrl+Shift+J to toggle it.</p>
+            </div>
+            <div class="timeline-dot flex-shrink-0 z-10 order-1 md:order-2 mx-auto md:mx-0"></div>
+            <div class="md:w-1/2 order-3"></div>
+          </div>
+
+          <div class="flex items-start gap-6 md:gap-8 flex-col md:flex-row" data-aos="fade-left">
+            <div class="md:w-1/2"></div>
+            <div class="timeline-dot flex-shrink-0 z-10 order-1 md:order-1 mx-auto md:mx-0"></div>
+            <div class="md:w-1/2 order-2">
+              <h4 class="font-semibold text-lg">4. Start Commanding</h4>
+              <p class="text-gray-400 text-sm mt-1 leading-relaxed">Type anything. "/smart quantum computing", "/screen", "/volume 40", "/open Spotify" — JARVIS responds.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PRICING -->
+  <section id="pricing" class="relative py-20 md:py-28">
+    <div class="max-w-5xl mx-auto px-6">
+      <div class="text-center mb-16" data-aos="fade-up">
+        <span class="security-badge mb-4"><i class="fas fa-tag text-cyan-400 text-xs"></i> Pricing</span>
+        <h2 class="text-3xl md:text-5xl font-bold">Free. Forever.</h2>
+        <p class="text-gray-400 mt-3 max-w-xl mx-auto">No tiers. No hidden features behind paywalls. Everything JARVIS can do, you get.</p>
+      </div>
+
+      <div class="max-w-2xl mx-auto">
+        <div class="glass rounded-2xl p-8 neon-border text-center glow-card" data-aos="fade-up">
+          <h4 class="text-sm text-cyan-400 uppercase tracking-wider mb-4 font-semibold">Full Version</h4>
+          <div class="stat-number text-4xl font-bold gradient-text mb-2">$0</div>
+          <p class="text-sm text-gray-500">MIT licensed. You provide the hardware and Ollama.</p>
+          <ul class="grid sm:grid-cols-2 gap-2.5 text-left text-sm text-gray-400 mt-6">
+            <li><i class="fas fa-check text-green-400 mr-2"></i> Local AI chat</li>
+            <li><i class="fas fa-check text-green-400 mr-2"></i> Screen analysis</li>
+            <li><i class="fas fa-check text-green-400 mr-2"></i> System automation</li>
+            <li><i class="fas fa-check text-green-400 mr-2"></i> File management</li>
+            <li><i class="fas fa-check text-green-400 mr-2"></i> Persistent notes</li>
+            <li><i class="fas fa-check text-green-400 mr-2"></i> Tray and global hotkey</li>
+            <li><i class="fas fa-check text-green-400 mr-2"></i> Web search</li>
+            <li><i class="fas fa-check text-green-400 mr-2"></i> Image generation</li>
+          </ul>
+        </div>
+      </div>
+      <p class="text-center text-gray-600 text-xs mt-6">No paid tiers. Web search and image generation rely on free third-party services that may change or rate-limit requests.</p>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section id="faq" class="relative py-20 md:py-28">
+    <div class="max-w-3xl mx-auto px-6">
+      <div class="text-center mb-14" data-aos="fade-up">
+        <span class="security-badge mb-4"><i class="fas fa-question-circle text-cyan-400 text-xs"></i> FAQ</span>
+        <h2 class="text-3xl md:text-5xl font-bold">Frequently Asked</h2>
+      </div>
+
+      <div class="space-y-4" data-aos="fade-up">
+        <div class="glass rounded-xl p-5 neon-border" onclick="toggleFaq(this)">
+          <div class="faq-q flex items-center justify-between cursor-pointer select-none">
+            <span class="text-sm font-medium">Is JARVIS really free?</span>
+            <i class="fas fa-chevron-down text-gray-600 text-xs transition-transform"></i>
+          </div>
+          <div class="faq-a mt-2 text-sm text-gray-500 leading-relaxed">Yes. JARVIS is 100% free and open source. No subscriptions, no paid tiers, no hidden costs. You only need to run Ollama, which is also free.</div>
+        </div>
+        <div class="glass rounded-xl p-5 neon-border" onclick="toggleFaq(this)">
+          <div class="faq-q flex items-center justify-between cursor-pointer select-none">
+            <span class="text-sm font-medium">Does JARVIS send my data anywhere?</span>
+            <i class="fas fa-chevron-down text-gray-600 text-xs transition-transform"></i>
+          </div>
+          <div class="faq-a mt-2 text-sm text-gray-500 leading-relaxed">Model inference stays on your machine. Two optional features use the internet: web search sends your query to DuckDuckGo, and image generation sends your prompt to Pollinations.ai. JARVIS has no telemetry or analytics.</div>
+        </div>
+        <div class="glass rounded-xl p-5 neon-border" onclick="toggleFaq(this)">
+          <div class="faq-q flex items-center justify-between cursor-pointer select-none">
+            <span class="text-sm font-medium">What hardware do I need?</span>
+            <i class="fas fa-chevron-down text-gray-600 text-xs transition-transform"></i>
+          </div>
+          <div class="faq-a mt-2 text-sm text-gray-500 leading-relaxed">Any Windows 10/11 PC with 8 GB RAM for small models; 16 GB or more is recommended. A GPU is optional but accelerates responses. JARVIS reads your RAM and recommends a model during setup.</div>
+        </div>
+        <div class="glass rounded-xl p-5 neon-border" onclick="toggleFaq(this)">
+          <div class="faq-q flex items-center justify-between cursor-pointer select-none">
+            <span class="text-sm font-medium">Can I use my own AI model?</span>
+            <i class="fas fa-chevron-down text-gray-600 text-xs transition-transform"></i>
+          </div>
+          <div class="faq-a mt-2 text-sm text-gray-500 leading-relaxed">Absolutely. JARVIS works with any model available in Ollama. Switch models from the Settings panel anytime — from tiny 1B models to massive 70B models.</div>
+        </div>
+        <div class="glass rounded-xl p-5 neon-border" onclick="toggleFaq(this)">
+          <div class="faq-q flex items-center justify-between cursor-pointer select-none">
+            <span class="text-sm font-medium">How is JARVIS different from ChatGPT?</span>
+            <i class="fas fa-chevron-down text-gray-600 text-xs transition-transform"></i>
+          </div>
+          <div class="faq-a mt-2 text-sm text-gray-500 leading-relaxed">ChatGPT is a hosted service. JARVIS is a desktop application with OS integration: it can read your screen, open programs, control volume, and manage files. Model inference is local; web search and image generation are optional online extras.</div>
+        </div>
+        <div class="glass rounded-xl p-5 neon-border" onclick="toggleFaq(this)">
+          <div class="faq-q flex items-center justify-between cursor-pointer select-none">
+            <span class="text-sm font-medium">Is JARVIS safe to use?</span>
+            <i class="fas fa-chevron-down text-gray-600 text-xs transition-transform"></i>
+          </div>
+          <div class="faq-a mt-2 text-sm text-gray-500 leading-relaxed">JARVIS uses several safeguards: DPAPI encryption for settings, a path allowlist for file operations, prompt-injection sanitization, explicit confirmation for risky system and network actions, and a local audit log. No desktop assistant is risk-free, so review what you ask it to do.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SHARE -->
+  <section id="share" class="relative py-20 md:py-28">
+    <div class="max-w-3xl mx-auto px-6 text-center" data-aos="fade-up">
+      <span class="security-badge mb-4"><i class="fas fa-share-nodes text-cyan-400 text-xs"></i> Share</span>
+      <h2 class="text-3xl md:text-5xl font-bold mb-3">Tell Your Friends</h2>
+      <p class="text-gray-400 mb-8">JARVIS is better when everyone uses it. Share with one click.</p>
+
+      <div class="flex flex-wrap items-center justify-center gap-3">
+        <button onclick="share('twitter')" class="glass rounded-xl px-5 py-3 neon-border text-sm text-gray-400 hover:text-white hover:border-cyan-500/40 transition-all flex items-center gap-2.5 glow-card">
+          <i class="fab fa-twitter text-lg" style="color:#1DA1F2"></i> Twitter
+        </button>
+        <button onclick="share('facebook')" class="glass rounded-xl px-5 py-3 neon-border text-sm text-gray-400 hover:text-white hover:border-cyan-500/40 transition-all flex items-center gap-2.5 glow-card">
+          <i class="fab fa-facebook text-lg" style="color:#1877F2"></i> Facebook
+        </button>
+        <button onclick="share('whatsapp')" class="glass rounded-xl px-5 py-3 neon-border text-sm text-gray-400 hover:text-white hover:border-cyan-500/40 transition-all flex items-center gap-2.5 glow-card">
+          <i class="fab fa-whatsapp text-lg" style="color:#25D366"></i> WhatsApp
+        </button>
+        <button onclick="share('telegram')" class="glass rounded-xl px-5 py-3 neon-border text-sm text-gray-400 hover:text-white hover:border-cyan-500/40 transition-all flex items-center gap-2.5 glow-card">
+          <i class="fab fa-telegram text-lg" style="color:#26A5E4"></i> Telegram
+        </button>
+        <button onclick="share('reddit')" class="glass rounded-xl px-5 py-3 neon-border text-sm text-gray-400 hover:text-white hover:border-cyan-500/40 transition-all flex items-center gap-2.5 glow-card">
+          <i class="fab fa-reddit text-lg" style="color:#FF4500"></i> Reddit
+        </button>
+        <button onclick="share('vk')" class="glass rounded-xl px-5 py-3 neon-border text-sm text-gray-400 hover:text-white hover:border-cyan-500/40 transition-all flex items-center gap-2.5 glow-card">
+          <i class="fab fa-vk text-lg" style="color:#0077FF"></i> VK
+         </button>
+        <button onclick="share('copy')" class="glass rounded-xl px-5 py-3 neon-border text-sm text-gray-400 hover:text-white hover:border-cyan-500/40 transition-all flex items-center gap-2.5 glow-card" id="copyBtn">
+          <i class="fas fa-link text-lg text-cyan-400"></i> Copy Link
+        </button>
+      </div>
+
+      <div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 glass px-5 py-2.5 rounded-xl text-sm text-white neon-border z-50" style="display:none;background:rgba(0,212,255,0.1);backdrop-filter:blur(16px);"></div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section id="cta" class="relative py-20 md:py-28">
+    <div class="absolute inset-0" style="background: radial-gradient(ellipse at 50% 50%, rgba(0,212,255,0.06), transparent 70%);"></div>
+    <div class="max-w-3xl mx-auto px-6 text-center relative" data-aos="fade-up">
+      <h2 class="text-3xl md:text-5xl font-bold mb-4">Ready to Meet JARVIS?</h2>
+      <p class="text-gray-400 text-lg mb-8 max-w-lg mx-auto">JARVIS does not have a public installer yet. Build it from source, bring your own Ollama model, and run it locally.</p>
+      <div class="flex flex-col sm:flex-row items-center justify-center gap-4">
+        <a href="#how-it-works" class="btn-primary text-sm px-10 py-4 rounded-xl tracking-wider flex items-center gap-3 text-base">
+          <i class="fas fa-code text-xl"></i> Build from Source
+        </a>
+        <a href="#features" class="btn-ghost text-sm px-8 py-4 rounded-xl flex items-center gap-2">
+          <i class="fas fa-list-check"></i> Review Features
+        </a>
+      </div>
+      <div class="flex items-center justify-center gap-6 mt-6 text-xs text-gray-600">
+        <span><i class="fas fa-check-circle text-green-500 mr-1"></i> No account</span>
+        <span><i class="fas fa-check-circle text-green-500 mr-1"></i> No telemetry</span>
+        <span><i class="fas fa-check-circle text-green-500 mr-1"></i> MIT license</span>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="relative py-14 border-t" style="border-color:rgba(0,212,255,0.06)">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="grid md:grid-cols-4 gap-10">
+        <div>
+          <div class="flex items-center gap-2.5 mb-4">
+            <svg viewBox="0 0 100 100" width="24" height="24" style="filter:drop-shadow(0 0 4px rgba(0,212,255,0.2))">
+              <circle cx="50" cy="50" r="48" fill="none" stroke="rgba(0,212,255,0.1)" stroke-width="1"/>
+              <circle cx="50" cy="50" r="38" fill="none" stroke="#00bfff" stroke-width="2"/>
+              <circle cx="50" cy="50" r="3" fill="#00d4ff" opacity="0.8"/>
+              <text x="50" y="57" text-anchor="middle" fill="#00d4ff" font-family="'Orbitron',monospace" font-size="34" font-weight="700">J</text>
+            </svg>
+            <span class="font-orbitron text-xs font-bold gradient-text tracking-widest">JARVIS</span>
+          </div>
+          <p class="text-xs text-gray-600 leading-relaxed">Your AI Desktop Commander. Built with Go, Wails2, Vue 3, and Ollama. Open source. Always free.</p>
+        </div>
+        <div>
+          <h5 class="text-xs text-gray-500 uppercase tracking-wider font-semibold mb-4">Product</h5>
+          <div class="space-y-2 text-sm">
+            <a href="#features" class="block text-gray-500">Features</a>
+            <a href="#security" class="block text-gray-500">Security</a>
+            <a href="#pricing" class="block text-gray-500">Pricing</a>
+            <a href="#faq" class="block text-gray-500">FAQ</a>
+          </div>
+        </div>
+        <div>
+          <h5 class="text-xs text-gray-500 uppercase tracking-wider font-semibold mb-4">Share</h5>
+          <div class="space-y-2 text-sm">
+            <button type="button" onclick="share('copy')" class="block text-gray-500">Copy link</button>
+            <button type="button" onclick="share('twitter')" class="block text-gray-500"><i class="fab fa-twitter mr-1.5"></i>Tweet</button>
+            <button type="button" onclick="share('whatsapp')" class="block text-gray-500"><i class="fab fa-whatsapp mr-1.5"></i>WhatsApp</button>
+            <button type="button" onclick="share('telegram')" class="block text-gray-500"><i class="fab fa-telegram mr-1.5"></i>Telegram</button>
+          </div>
+        </div>
+        <div>
+          <h5 class="text-xs text-gray-500 uppercase tracking-wider font-semibold mb-4">License</h5>
+          <div class="space-y-2 text-sm">
+            <span class="block text-gray-500">MIT License</span>
+            <span class="block text-gray-500">See LICENSE in the repository</span>
+            <a href="#security" class="block text-gray-500">Security model</a>
+          </div>
+        </div>
+      </div>
+      <div class="mt-10 pt-6 border-t flex flex-col md:flex-row items-center justify-between gap-4" style="border-color:rgba(0,212,255,0.06)">
+        <p class="text-xs text-gray-700">&copy; 2026 JARVIS contributors. Open source under the MIT License.</p>
+        <p class="text-xs text-gray-700">Built with Go, Wails 2, Vue 3, and Ollama.</p>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    AOS.init({ once: true, offset: 100, duration: 600 })
+
+    function toggleFaq(el) {
+      el.querySelector('.faq-a').classList.toggle('open')
+      const icon = el.querySelector('.fa-chevron-down')
+      icon.style.transform = icon.style.transform === 'rotate(180deg)' ? 'rotate(0deg)' : 'rotate(180deg)'
+    }
+
+    // Share functionality
+    const SHARE_TEXT = encodeURIComponent('Meet JARVIS — a local-first, open-source AI desktop assistant for Windows.')
+
+    function siteUrl() {
+      return window.location.href.split('?')[0].split('#')[0].replace(/\/$/, '')
+    }
+
+    function share(platform) {
+      const url = encodeURIComponent(siteUrl())
+      const text = SHARE_TEXT
+      const hashtags = 'AI,DesktopAssistant,OpenSource'
+      const links = {
+        twitter: `https://twitter.com/intent/tweet?text=${text}&url=${url}&hashtags=${hashtags}`,
+        facebook: `https://www.facebook.com/sharer/sharer.php?u=${url}&quote=${text}`,
+        whatsapp: `https://api.whatsapp.com/send?text=${text}%20${url}`,
+        telegram: `https://t.me/share/url?url=${url}&text=${text}`,
+        reddit: `https://reddit.com/submit?url=${url}&title=${text}`,
+        vk: `https://vk.com/share.php?url=${url}&title=${text}`,
+      }
+      if (platform === 'copy') {
+        navigator.clipboard.writeText(siteUrl()).then(() => {
+          const toast = document.getElementById('toast')
+          toast.textContent = 'Link copied! Share with friends, Sir.'
+          toast.style.display = 'block'
+          setTimeout(() => { toast.style.display = 'none' }, 2500)
+        })
+        return
+      }
+      window.open(links[platform], '_blank', 'width=600,height=500')
+    }
+
+    // Smooth scroll
+    document.querySelectorAll('a[href^="#"]').forEach(a => {
+      a.addEventListener('click', e => {
+        e.preventDefault()
+        const target = document.querySelector(a.getAttribute('href'))
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      })
+    })
+  </script>
+</body>
+</html>

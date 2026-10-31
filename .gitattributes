@@ -1,2 +1,10 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Normalize text files to LF in the repository.
+* text=auto eol=lf
+
+# Keep binary assets untouched.
+*.wav binary
+*.png binary
+*.ico binary
+*.woff2 binary
+*.exe binary
+*.dll binary

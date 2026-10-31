@@ -26,14 +26,12 @@ import (
 
 // VoiceStatus is the settings-screen snapshot of the voice subsystem.
 type VoiceStatus struct {
-	Enabled        bool               `json:"enabled"`
-	State          string             `json:"state"`
-	WakeWord       string             `json:"wake_word"`
-	City           string             `json:"city"`
-	Engine         voiceengine.Status `json:"engine"`
-	Input          voiceinput.Status  `json:"input"`
-	TTSAvailable   bool               `json:"tts_available"`
-	PiperAvailable bool               `json:"piper_available"`
+	Enabled  bool               `json:"enabled"`
+	State    string             `json:"state"`
+	WakeWord string             `json:"wake_word"`
+	City     string             `json:"city"`
+	Engine   voiceengine.Status `json:"engine"`
+	Input    voiceinput.Status  `json:"input"`
 }
 
 func (a *App) voiceInputDisabled() bool {
@@ -46,12 +44,6 @@ func (a *App) wakeWordDisabled() bool {
 	a.stateMu.RLock()
 	defer a.stateMu.RUnlock()
 	return a.settings.WakeWordDisabled
-}
-
-func (a *App) voiceTTSEnabled() bool {
-	a.stateMu.RLock()
-	defer a.stateMu.RUnlock()
-	return !a.settings.VoiceTTSDisabled
 }
 
 func (a *App) voiceConfirmDangerous() bool {
@@ -200,6 +192,7 @@ func (a *App) startVoiceInput() error {
 	manager := voiceinput.NewManager(paths, settings.VoiceDeviceID, callbacks)
 	manager.SetWakeWord(settings.VoiceWakeWord)
 	manager.SetWakeWordDisabled(settings.WakeWordDisabled)
+	manager.SetLanguage(settings.VoiceLanguage)
 	var err error
 	for attempt := 0; attempt < 25; attempt++ {
 		a.voiceMu.Lock()
@@ -253,9 +246,6 @@ func (a *App) stopVoiceInput() {
 // interruptVoicePlayback stops TTS and phrase playback so an explicit voice
 // toggle does not wait for a long spoken reply.
 func (a *App) interruptVoicePlayback() {
-	if a.tts != nil {
-		a.tts.Stop()
-	}
 	if a.voice != nil {
 		a.voice.Stop()
 	}
@@ -270,6 +260,29 @@ func (a *App) restartVoiceInput() error {
 		return nil
 	}
 	return a.startVoiceInput()
+}
+
+// startVoiceInputWithRetry keeps trying after a logon start. Windows may still
+// be starting the audio service when the Run entry fires, and a single failure
+// must not leave JARVIS deaf until the next manual restart.
+func (a *App) startVoiceInputWithRetry() {
+	backoff := 5 * time.Second
+	for attempt := 0; attempt < 6; attempt++ {
+		if a.voiceInputDisabled() || a.voiceManager() != nil {
+			return
+		}
+		err := a.startVoiceInput()
+		if err == nil && a.voiceManager() != nil {
+			return
+		}
+		if err != nil && !errors.Is(err, errVoiceStartCanceled) {
+			agentLog("voice input start (attempt %d): %v", attempt+1, err)
+		}
+		time.Sleep(backoff)
+		if backoff < 30*time.Second {
+			backoff += 5 * time.Second
+		}
+	}
 }
 
 func (a *App) onVoiceWake() {
@@ -300,7 +313,7 @@ func (a *App) onVoiceCommand(text string) bool {
 	userMessage := ollama.Message{Role: "user", Content: text}
 	a.appendHistory(userMessage)
 
-	display, speech, followUp := a.handleVoiceText(text)
+	display, followUp := a.handleVoiceText(text)
 	if a.voiceContext().Err() != nil {
 		// The user stopped voice input while the command was running. Drop the
 		// unfinished turn instead of persisting a misleading error reply.
@@ -312,27 +325,24 @@ func (a *App) onVoiceCommand(text string) bool {
 		a.setLastAssistant(display)
 		a.emitEvent("voice:message", map[string]any{"role": "assistant", "content": display})
 	}
-	if speech != "" {
-		a.speakVoice(speech)
-	}
 	return followUp
 }
 
-func (a *App) handleVoiceText(text string) (display, speech string, followUp bool) {
+func (a *App) handleVoiceText(text string) (display string, followUp bool) {
 	if rest, hadWake := a.stripConfiguredWake(text); hadWake {
 		if rest == "" {
-			return "Да, сэр?", "Да, сэр?", true
+			return "Да, сэр?", true
 		}
 		text = rest
 	}
 	if pending, confirmed := a.intents.TakeConfirmation(text); confirmed {
 		result := a.runConfirmed(pending)
-		display, speech = a.describeConfirmed(pending, result)
-		return display, speech, false
+		display = a.describeConfirmed(pending, result)
+		return display, false
 	}
 	if a.intents.Has() && intent.IsCancellation(text) {
 		a.intents.Clear()
-		return "Отменено, сэр.", "Отменено, сэр.", false
+		return "Отменено, сэр.", false
 	}
 	if a.intents.Has() {
 		a.intents.Clear()
@@ -340,12 +350,12 @@ func (a *App) handleVoiceText(text string) (display, speech string, followUp boo
 
 	action, ok := intent.ParseRussian(text)
 	if !ok {
-		return "Не расслышал, сэр.", "Не расслышал, сэр.", false
+		return "Не расслышал, сэр.", false
 	}
 
 	switch action.Kind {
 	case intent.VoiceWake:
-		return "Да, сэр?", "Да, сэр?", true
+		return "Да, сэр?", true
 	case intent.VoiceWeather:
 		return a.voiceWeather(action)
 	case intent.VoiceOpenBrowser:
@@ -366,24 +376,29 @@ func (a *App) handleVoiceText(text string) (display, speech string, followUp boo
 		return a.voiceVolume(action)
 	case intent.VoiceTime:
 		return a.voiceTime(action.Text)
+	case intent.VoiceReminder:
+		return a.voiceReminder(action)
+	case intent.VoiceReminders:
+		return a.voiceListReminders()
+	case intent.VoiceGameStatus:
+		return a.voiceGameStatus()
+	case intent.VoiceGameRemember:
+		return a.voiceGameRemember()
 	case intent.VoiceStop:
-		if a.tts != nil {
-			a.tts.Stop()
-		}
 		if a.voice != nil {
 			a.voice.Stop()
 		}
-		// Do not speak an acknowledgement: the user asked for silence.
-		return "Останавливаюсь, сэр.", "", false
+		// The user asked for silence, so the reply stays on screen only.
+		return "Останавливаюсь, сэр.", false
 	case intent.VoiceCancel:
 		a.intents.Clear()
-		return "Отменено, сэр.", "Отменено, сэр.", false
+		return "Отменено, сэр.", false
 	case intent.VoiceRepeat:
 		last := a.getLastAssistant()
 		if last == "" {
-			return "Мне нечего повторять, сэр.", "Мне нечего повторять, сэр.", false
+			return "Мне нечего повторять, сэр.", false
 		}
-		return last, last, false
+		return last, false
 	case intent.VoiceChat:
 		query := action.Query
 		if query == "" {
@@ -391,7 +406,7 @@ func (a *App) handleVoiceText(text string) (display, speech string, followUp boo
 		}
 		return a.voiceChat(query)
 	default:
-		return "Не расслышал, сэр.", "Не расслышал, сэр.", false
+		return "Не расслышал, сэр.", false
 	}
 }
 
@@ -412,18 +427,18 @@ func (a *App) stripConfiguredWake(text string) (string, bool) {
 	return text, false
 }
 
-func (a *App) voiceDangerous(kind intent.Kind, arg, prompt string) (string, string, bool) {
+func (a *App) voiceDangerous(kind intent.Kind, arg, prompt string) (string, bool) {
 	if a.voiceConfirmDangerous() {
 		a.intents.Set(kind, arg)
 		text := "Сэр, " + prompt + " Скажите «да» для подтверждения."
-		return text, text, true
+		return text, true
 	}
 	result := a.runConfirmed(intent.Pending{Kind: kind, Arg: arg})
-	display, speech := a.describeConfirmed(intent.Pending{Kind: kind, Arg: arg}, result)
-	return display, speech, false
+	display := a.describeConfirmed(intent.Pending{Kind: kind, Arg: arg}, result)
+	return display, false
 }
 
-func (a *App) describeConfirmed(pending intent.Pending, result string) (string, string) {
+func (a *App) describeConfirmed(pending intent.Pending, result string) string {
 	// Do not treat arbitrary search snippets containing "not found" as an
 	// action failure. Only the command result's own error prefixes count.
 	failed := looksLikeError(result) || strings.HasPrefix(
@@ -431,28 +446,28 @@ func (a *App) describeConfirmed(pending intent.Pending, result string) (string, 
 		"nothing to confirm",
 	)
 	if failed {
-		return result, "Не удалось выполнить действие, сэр."
+		return result
 	}
 	if looksLikeNoResults(result) {
-		return result, "Ничего не найдено, сэр."
+		return result
 	}
 	switch pending.Kind {
 	case intent.Shutdown:
-		return "Выключаю компьютер через пять секунд, сэр.", "Выключаю компьютер через пять секунд, сэр."
+		return "Выключаю компьютер через пять секунд, сэр."
 	case intent.Restart:
-		return "Перезагружаю компьютер через пять секунд, сэр.", "Перезагружаю компьютер через пять секунд, сэр."
+		return "Перезагружаю компьютер через пять секунд, сэр."
 	case intent.Screenshot:
-		return result, "Снимок экрана сохранён, сэр."
+		return result
 	case intent.WebSearch, intent.SmartSearch:
-		return result, "Поиск завершён, сэр. Результаты на экране."
+		return result
 	case intent.OpenApp:
-		return result, "Готово, сэр."
+		return result
 	default:
-		return result, result
+		return result
 	}
 }
 
-func (a *App) voiceWeather(action intent.VoiceAction) (string, string, bool) {
+func (a *App) voiceWeather(action intent.VoiceAction) (string, bool) {
 	settings := a.GetSettings()
 	requestedCity := strings.TrimSpace(action.City)
 	city := requestedCity
@@ -493,7 +508,7 @@ func (a *App) voiceWeather(action intent.VoiceAction) (string, string, bool) {
 	}
 	if err != nil {
 		message := "Не удалось получить прогноз погоды, сэр. " + err.Error()
-		return message, message, false
+		return message, false
 	}
 
 	firstLocation := !settings.VoiceLocationAsked && requestedCity == "" && city == ""
@@ -507,44 +522,43 @@ func (a *App) voiceWeather(action intent.VoiceAction) (string, string, bool) {
 	}
 
 	display := forecast.Markdown()
-	speech := forecast.Speech()
 	if firstLocation {
-		speech = "Сэр, я определил ваше местоположение: " + forecast.Location.Name + ". " + speech
+		display = "Сэр, я определил ваше местоположение: " + forecast.Location.Name + ".\n\n" + display
 	}
-	return display, speech, false
+	return display, false
 }
 
-func (a *App) voiceOpenBrowser() (string, string, bool) {
+func (a *App) voiceOpenBrowser() (string, bool) {
 	if a.ctx == nil {
-		return "Приложение ещё не готово, сэр.", "Приложение ещё не готово, сэр.", false
+		return "Приложение ещё не готово, сэр.", false
 	}
 	wruntime.BrowserOpenURL(a.ctx, "https://www.google.com")
-	return "Открываю браузер, сэр.", "Открываю браузер, сэр.", false
+	return "Открываю браузер, сэр.", false
 }
 
-func (a *App) voiceOpenURL(rawURL string) (string, string, bool) {
+func (a *App) voiceOpenURL(rawURL string) (string, bool) {
 	if a.ctx == nil {
-		return "Приложение ещё не готово, сэр.", "Приложение ещё не готово, сэр.", false
+		return "Приложение ещё не готово, сэр.", false
 	}
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || parsed == nil {
-		return "Некорректная ссылка, сэр.", "Некорректная ссылка, сэр.", false
+		return "Некорректная ссылка, сэр.", false
 	}
 	scheme := strings.ToLower(parsed.Scheme)
 	if parsed.Host == "" || (scheme != "http" && scheme != "https") {
-		return "Некорректная ссылка, сэр.", "Некорректная ссылка, сэр.", false
+		return "Некорректная ссылка, сэр.", false
 	}
 	if !browser.IsPublicURL(a.ctx, parsed.String()) {
-		return "Локальные и частные адреса открывать нельзя, сэр.", "Локальные и частные адреса открывать нельзя, сэр.", false
+		return "Локальные и частные адреса открывать нельзя, сэр.", false
 	}
 	wruntime.BrowserOpenURL(a.ctx, parsed.String())
-	return "Открываю ссылку, сэр.", "Открываю ссылку, сэр.", false
+	return "Открываю ссылку, сэр.", false
 }
 
-func (a *App) voiceOpenApp(name string) (string, string, bool) {
+func (a *App) voiceOpenApp(name string) (string, bool) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return "Какое приложение открыть, сэр?", "Какое приложение открыть, сэр?", false
+		return "Какое приложение открыть, сэр?", false
 	}
 	if target, ok := voiceSiteURLs[strings.ToLower(name)]; ok {
 		return a.voiceOpenURL(target)
@@ -552,43 +566,43 @@ func (a *App) voiceOpenApp(name string) (string, string, bool) {
 	result := commands.LaunchByName(name)
 	if looksLikeError(result) {
 		message := fmt.Sprintf("Не удалось открыть %s, сэр.", name)
-		return message, message, false
+		return message, false
 	}
 	message := fmt.Sprintf("Открываю %s, сэр.", name)
-	return message, message, false
+	return message, false
 }
 
-func (a *App) voiceWebSearch(query string) (string, string, bool) {
+func (a *App) voiceWebSearch(query string) (string, bool) {
 	if !a.webSearchEnabled() {
-		return "Поиск в интернете отключён в настройках, сэр.", "Поиск в интернете отключён в настройках, сэр.", false
+		return "Поиск в интернете отключён в настройках, сэр.", false
 	}
 	query = strings.TrimSpace(query)
 	if query == "" {
-		return "Что найти, сэр?", "Что найти, сэр?", false
+		return "Что найти, сэр?", false
 	}
 	result := a.runConfirmed(intent.Pending{Kind: intent.WebSearch, Arg: query})
 	if looksLikeError(result) {
-		return result, "Не удалось выполнить поиск, сэр.", false
+		return result, false
 	}
 	if looksLikeNoResults(result) {
-		return result, "Ничего не найдено, сэр.", false
+		return result, false
 	}
-	return result, "Поиск завершён, сэр. Результаты на экране.", false
+	return result, false
 }
 
-func (a *App) voiceVolume(action intent.VoiceAction) (string, string, bool) {
+func (a *App) voiceVolume(action intent.VoiceAction) (string, bool) {
 	if action.Mute != nil {
 		if err := audio.SetMuted(*action.Mute); err != nil {
 			message := "Не удалось изменить звук, сэр."
-			return message, message, false
+			return message, false
 		}
 		if *action.Mute {
-			return "Звук выключен, сэр.", "Звук выключен, сэр.", false
+			return "Звук выключен, сэр.", false
 		}
-		return "Звук включён, сэр.", "Звук включён, сэр.", false
+		return "Звук включён, сэр.", false
 	}
 	if action.Volume == nil {
-		return "Не понял команду громкости, сэр.", "Не понял команду громкости, сэр.", false
+		return "Не понял команду громкости, сэр.", false
 	}
 	text := strings.ToLower(action.Text)
 	relative := strings.Contains(text, "громче") || strings.Contains(text, "тише") ||
@@ -606,21 +620,21 @@ func (a *App) voiceVolume(action intent.VoiceAction) (string, string, bool) {
 	}
 	if err != nil {
 		message := "Не удалось изменить громкость, сэр."
-		return message, message, false
+		return message, false
 	}
 	message := fmt.Sprintf("Громкость %d процентов, сэр.", level)
-	return message, message, false
+	return message, false
 }
 
-func (a *App) voiceTime(text string) (string, string, bool) {
+func (a *App) voiceTime(text string) (string, bool) {
 	lower := strings.ToLower(text)
 	now := time.Now()
 	if strings.Contains(lower, "дата") || strings.Contains(lower, "число") || strings.Contains(lower, "день") {
 		message := "Сегодня " + russianDate(now) + ", сэр."
-		return message, message, false
+		return message, false
 	}
 	message := "Сейчас " + russianTime(now) + ", сэр."
-	return message, message, false
+	return message, false
 }
 
 func russianTime(now time.Time) string {
@@ -644,15 +658,15 @@ func russianPlural(n int, one, few, many string) string {
 	}
 }
 
-func (a *App) voiceChat(query string) (string, string, bool) {
+func (a *App) voiceChat(query string) (string, bool) {
 	sanitized := sanitize.SanitizeUserInput(query)
 	if sanitized.HadInjection {
 		message := "Я не могу выполнить этот запрос, сэр."
-		return message, message, false
+		return message, false
 	}
 	content := strings.TrimSpace(sanitized.Content)
 	if content == "" {
-		return "Не расслышал, сэр.", "Не расслышал, сэр.", false
+		return "Не расслышал, сэр.", false
 	}
 	// onVoiceCommand has already appended the user's utterance to history.
 	history := a.snapshotHistory()
@@ -664,31 +678,14 @@ func (a *App) voiceChat(query string) (string, string, bool) {
 		// spoken error as the assistant turn, so removing the user turn here
 		// would leave an assistant-only pair and corrupt the conversation.
 		message := "Не удалось получить ответ от модели, сэр."
-		return message, message, false
+		return message, false
 	}
 	reply = strings.TrimSpace(reply)
 	if reply == "" {
-		return "Модель вернула пустой ответ, сэр.", "Модель вернула пустой ответ, сэр.", false
+		return "Модель вернула пустой ответ, сэр.", false
 	}
 	// onVoiceCommand appends the assistant turn after this function returns.
-	return reply, reply, false
-}
-
-func (a *App) speakVoice(text string) {
-	text = strings.TrimSpace(text)
-	if text == "" || a.tts == nil || !a.voiceTTSEnabled() {
-		return
-	}
-	manager := a.voiceManager()
-	if manager != nil {
-		manager.Pause()
-		defer manager.Resume()
-	}
-	ctx, cancel := context.WithTimeout(a.voiceContext(), 90*time.Second)
-	defer cancel()
-	if err := a.tts.Speak(ctx, text); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		a.emitEvent("voice:error", map[string]any{"message": err.Error()})
-	}
+	return reply, false
 }
 
 func (a *App) setLastAssistant(text string) {
@@ -789,20 +786,25 @@ func (a *App) GetVoiceStatus() VoiceStatus {
 		engine.IntegrityError = err.Error()
 	}
 	return VoiceStatus{
-		Enabled:        !settings.VoiceInputDisabled,
-		State:          string(input.State),
-		WakeWord:       settings.VoiceWakeWord,
-		City:           settings.VoiceCity,
-		Engine:         engine,
-		Input:          input,
-		TTSAvailable:   a.tts != nil,
-		PiperAvailable: a.tts != nil && a.tts.PiperReady(),
+		Enabled:  !settings.VoiceInputDisabled,
+		State:    string(input.State),
+		WakeWord: settings.VoiceWakeWord,
+		City:     settings.VoiceCity,
+		Engine:   engine,
+		Input:    input,
 	}
 }
 
 // GetVoiceDevices enumerates microphone endpoints.
 func (a *App) GetVoiceDevices() ([]voiceinput.Device, error) {
 	return voiceinput.ListDevices()
+}
+
+// GetMicrophoneDiagnostics checks whether a microphone is connected, allowed by
+// Windows privacy settings, and actually picking up sound.
+func (a *App) GetMicrophoneDiagnostics() voiceinput.MicrophoneDiagnostics {
+	settings := a.GetSettings()
+	return voiceinput.DiagnoseMicrophone(settings.VoiceDeviceID)
 }
 
 // StartVoiceInput enables and starts continuous listening.
@@ -915,26 +917,6 @@ func (a *App) SetWeatherCity(city string) (string, error) {
 		return "", err
 	}
 	return location.Name, nil
-}
-
-// TestVoice speaks a short sample through the configured TTS engine.
-func (a *App) TestVoice() string {
-	if a.tts == nil {
-		return "TTS is not initialized"
-	}
-	if !a.voiceTTSEnabled() {
-		return "Text-to-speech is disabled in Settings."
-	}
-	if manager := a.voiceManager(); manager != nil {
-		manager.Pause()
-		defer manager.Resume()
-	}
-	ctx, cancel := context.WithTimeout(a.voiceBaseContext(), 30*time.Second)
-	defer cancel()
-	if err := a.tts.Speak(ctx, "Да, сэр. Система озвучивания Джарвис работает."); err != nil {
-		return err.Error()
-	}
-	return ""
 }
 
 func russianDate(now time.Time) string {

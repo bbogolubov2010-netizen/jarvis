@@ -6,6 +6,14 @@
 *.dylib
 build/bin/
 
+# --- Local models / voice engine ---
+*.onnx
+*.bin
+voice-engine/
+
+# --- Legacy nested copy (keep out of the published tree) ---
+/jarvis/
+
 # --- Go ---
 *.test
 *.out

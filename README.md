@@ -17,10 +17,12 @@ The AI model runs on your machine through Ollama. JARVIS has no telemetry, no ac
 - **Notes** persisted locally and encrypted with Windows DPAPI.
 - **Web search**: DuckDuckGo results are fetched through an egress-filtered headless browser, sanitized, and summarized by the local model.
 - **Image generation** through Pollinations.ai, disabled until you explicitly opt in in Settings.
-- **System tray** with Show / Hide / Quit, and a global `Ctrl+Shift+J` hotkey.
+- **System tray** with Show / Hide / Quit, and a global `Ctrl+Shift+J` hotkey. Closing the window hides JARVIS to the tray; the tray **Quit** item is the only real exit.
 - **Spoken phrases** for actions, with an on/off toggle in Settings.
-- **Russian voice control**: local Vosk wake word («привет Джарвис»), Whisper command recognition, Piper TTS replies, microphone selection, and push-to-talk.
-- **Supervised background wake-word agent**: an optional logon supervisor keeps the wake-word agent alive while the main window is closed and restarts it after a crash.
+- **Russian & English voice control**: local Vosk wake words («привет Джарвис» / «hey Jarvis»), bilingual Whisper command recognition, microphone selection, push-to-talk, and a built-in microphone health check.
+- **Autostart**: an optional logon entry starts the full application hidden in the tray, so the wake word, hotkey and tray icon are available immediately. Legacy supervised-agent entries are migrated automatically.
+- **Proactive assistant**: a startup briefing (time, weather, next reminder, current game), reminders and timers that fire while JARVIS is running, and a local-model watchdog. Unprompted messages respect quiet hours (23:00–08:00) and the autonomy level in Settings.
+- **Game awareness**: detects the foreground game without Steam, remembers titles you confirm, tracks session and daily playtime locally, and offers a break after an hour. Detection is read-only — no injection, memory reads, or input automation.
 - **Local weather**: Open-Meteo forecasts with a one-time location prompt, IP geolocation, and Russian city-name normalization.
 - **Audit log** of actions and confirmations, stored locally and pruned after 30 days.
 - **DPAPI-encrypted settings, history, and notes** at rest.
@@ -64,24 +66,23 @@ The AI model runs on your machine through Ollama. JARVIS has no telemetry, no ac
 
 ## Voice engine
 
-Speech recognition and synthesis stay local. Large binaries and models are **not** embedded in `Jarvis.exe`; they live next to it in `build/bin/voice-engine` (or `%AppData%\Jarvis\voice-engine`):
+Speech recognition stays local. Large binaries and models are **not** embedded in `Jarvis.exe`; they live next to it in `build/bin/voice-engine` (or `%AppData%\Jarvis\voice-engine`):
 
 ```
 voice-engine/
   libvosk.dll, libgcc_s_seh-1.dll, libstdc++-6.dll, libwinpthread-1.dll
   vosk-model-small-ru-0.22/
+  vosk-model-small-en-us-0.15/        (optional, English wake words)
   whisper/
     whisper-cli.exe, ggml.dll, ggml-cuda.dll, cublas64_12.dll, ...
     ggml-large-v3-turbo.bin
-  piper/
-    piper.exe, espeak-ng-data/, ru_RU-irina-medium.onnx, ru_RU-irina-medium.onnx.json
 ```
 
-The app searches `voice-engine` next to the executable, then `%AppData%\Jarvis\voice-engine`. The engine status and the detected Whisper model are shown in Settings. The full `ggml-large-v3-turbo.bin` model is preferred; q8/q5/large-v3/medium/small fallbacks are accepted. If Whisper is missing, wake-word detection still loads but commands cannot be transcribed. If Piper is missing, JARVIS falls back to Windows SAPI for spoken replies.
+The app searches `voice-engine` next to the executable, then `%AppData%\Jarvis\voice-engine`. The engine status and the detected Whisper model are shown in Settings. The full `ggml-large-v3-turbo.bin` model is preferred; q8/q5/large-v3/medium/small fallbacks are accepted. If Whisper is missing, wake-word detection still loads but commands cannot be transcribed. The English Vosk model is optional: without it, English commands are still recognized by Whisper, but only the Russian wake word is detected.
 
-The wake word is detected with Vosk; commands and free-form chat are transcribed with Whisper and sent only to the local Ollama server. Weather, first-launch geolocation, and optional web search use the network. The browser process is routed through a loopback filtering proxy that rejects private, loopback, link-local, and non-public destinations.
+JARVIS does not speak its replies. Answers are shown in the window only; short confirmation phrases and the greeting still use the local voice pack. Wake words are detected with Vosk; commands and free-form chat are transcribed with Whisper and sent only to the local Ollama server. Weather, first-launch geolocation, and optional web search use the network. The browser process is routed through a loopback filtering proxy that rejects private, loopback, link-local, and non-public destinations.
 
-To make wake word work after the main window is closed, enable **Auto-start with Windows** in Settings. With voice input enabled, the logon entry runs `Jarvis.exe --voice-agent-supervisor`; the supervisor restarts the background agent after a crash, and the agent releases the microphone as soon as the main app starts and takes it back when the app exits. Existing `--voice-agent` entries are migrated automatically. The app and the agent communicate over an authenticated loopback channel, so commands never appear on a process command line.
+To keep JARVIS available at every logon, enable **Auto-start with Windows** in Settings. The entry runs `Jarvis.exe --hidden`: the full application starts with its window hidden in the tray, so the wake word, the `Ctrl+Shift+J` hotkey and the tray icon work immediately. Legacy `--voice-agent-supervisor` and `--voice-agent` entries are migrated to `--hidden` on the next start. The Settings panel shows the current Run value, whether the executable exists, and a **TEST START** button that launches a headless self-check (`--autostart-check`) without disturbing the running instance. JARVIS also clears a stale Explorer `StartupApproved` flag, which is a common reason a valid Run entry silently stops starting.
 
 ### Voice engine integrity (optional)
 
@@ -92,7 +93,7 @@ go run ./tools/checksumgen -root build\bin\voice-engine
 go run ./tools/checksumgen -root build\bin\voice-engine -verify
 ```
 
-The default manifest covers `libvosk.dll`, `whisper/whisper-cli.exe`, `whisper/whisper.dll`, `whisper/ggml.dll`, `piper/piper.exe`, and `piper/piper_phonemize.dll`. Add `-all` to hash every file under the engine root, including the Whisper and Piper models; this makes startup verification noticeably slower. A missing manifest is accepted for backward compatibility. Set `JARVIS_VOICE_REQUIRE_CHECKSUMS=1` to make it mandatory. If a listed file is missing or does not match, the UI reports the failure and voice input stays disabled; the background agent re-checks a failing engine once a minute so it can be repaired without a restart.
+The default manifest covers `libvosk.dll`, `whisper/whisper-cli.exe`, `whisper/whisper.dll`, and `whisper/ggml.dll`. Add `-all` to hash every file under the engine root, including the Whisper models; this makes startup verification noticeably slower. A missing manifest is accepted for backward compatibility. Set `JARVIS_VOICE_REQUIRE_CHECKSUMS=1` to make it mandatory. If a listed file is missing or does not match, the UI reports the failure and voice input stays disabled; the background agent re-checks a failing engine once a minute so it can be repaired without a restart.
 
 ## Development
 
@@ -119,12 +120,17 @@ Commands are recognized only when the message starts with `/`. A bare word such 
 | `/system` | Basic system information. |
 | `/screenshot`, `/screen` | Capture the screen after confirmation. Use the screen-analysis button in the UI to ask a vision model about the screenshot. |
 | `/open <app>` | Launch a detected application after confirmation. |
+| `/apps` | List detected applications from the local catalog. |
 | `/volume <0-100>`, `/volume mute`, `/volume unmute` | Control the default output device. |
 | `/shutdown`, `/restart` | System power actions after a `YES` confirmation. |
 | `/ls [path]`, `/cat <path>` | List or read files in allowed folders. |
 | `/mkdir <path>`, `/touch <path>`, `/write <path> <text>` | Create directories or files in allowed folders. |
 | `/note <text>`, `/notes` | Save and list notes. |
 | `/audit` | Show recent audit log entries. |
+| `/remind <minutes> <text>` | Set a reminder. Minutes may be 1 to 10080 (7 days). |
+| `/timer <minutes>` | Set a timer. |
+| `/reminders` | List pending reminders. |
+| `/game [status\|list\|add [name]\|forget <name>]` | Show the current game session, list remembered games, remember the foreground game, or forget one. |
 | `/smart <query>` | Web search plus a model summary. Requires web search to be enabled and a `YES` confirmation. |
 | `/search <query>` | DuckDuckGo results after a `YES` confirmation. Requires web search to be enabled. |
 | `/imagine <prompt> [--size WxH]` | Generate an image online. Requires the image-generation opt-in in Settings. |
@@ -135,10 +141,13 @@ Slash commands with side effects ask for confirmation. For `/shutdown`, `/restar
 
 All data stays under `%AppData%\Jarvis`:
 
-- `settings.json` — DPAPI-encrypted settings (Ollama URL, model, system prompt, web search and voice toggles, auto-start preference, image-generation opt-in).
+- `settings.json` — DPAPI-encrypted settings (Ollama URL, model, system prompt, web search and voice toggles, auto-start preference, image-generation opt-in, autonomy level, briefing and game toggles).
 - `history.json` — DPAPI-encrypted chat history, limited to the last 40 user/assistant messages. The system prompt is not stored here; it is read from settings on startup. Legacy plaintext files are still readable and are migrated on the next save.
 - `history.json.bak` — previous valid encrypted history file, used automatically if `history.json` is missing or corrupt.
 - `notes.json` — DPAPI-encrypted notes. Legacy plaintext files remain readable and are migrated on the next save.
+- `reminders.json` — pending reminders and timers. A corrupt file is moved to a timestamped backup and an empty list is used.
+- `games.json` — remembered games and the last 30 days of per-game playtime. Only executable names, display names, and paths are stored.
+- `autostart-check.txt` — timestamp written by the **TEST START** self-check.
 - `*.corrupt-<timestamp>` — recoverable copy created before a corrupt settings or history file is replaced. The UI reports the backup path.
 - `voice\` — phrase WAV files copied from the bundled `voice` folder on first launch. The bundled folder is read from next to the executable (or the project root during development). Replace a file in the AppData copy to customize a phrase; existing files are never overwritten by the app.
 - `voice-engine\` — optional per-user copy of the local speech engines and models. The portable `build/bin/voice-engine` folder is preferred when present.
@@ -146,7 +155,9 @@ All data stays under `%AppData%\Jarvis`:
 - `voice-agent.log` — background agent metadata and error log. Raw transcripts are redacted unless `JARVIS_VOICE_DEBUG=1` is set. It rotates to `voice-agent.log.1` at 1 MiB.
 - `logs\YYYY-MM-DD.log` — daily audit log (action names and web-search queries; chat message contents and command arguments are not logged). Entries older than 30 days are removed at startup.
 
-Settings can be changed in the in-app Settings panel. The Ollama URL must be an `http` or `https` URL; connection failures are reported in the UI. Model names, the system prompt, city, wake word, microphone fields, and weather coordinates are validated before saving. Chat history is restored when the app starts; `/clear` removes both the in-memory and persisted conversation. Voice output can be disabled in Settings; when enabled it uses the system playback volume and reads replies through Piper or the Windows SAPI fallback. Stopping voice input also cancels an in-flight spoken request instead of waiting for the model timeout.
+Settings can be changed in the in-app Settings panel. The Ollama URL must be an `http` or `https` URL; connection failures are reported in the UI. Model names, the system prompt, city, wake word, microphone fields, and weather coordinates are validated before saving. Chat history is restored when the app starts; `/clear` removes both the in-memory and persisted conversation. JARVIS does not read its answers aloud: replies appear in the chat window only, while short confirmation phrases and the greeting still play from the local voice pack. The recognition language can be left on `Auto` or pinned to Russian/English. Stopping voice input also cancels an in-flight spoken request instead of waiting for the model timeout. The microphone check in Settings reports device count, Windows privacy consent, endpoint state, and a short peak-level measurement.
+
+**Proactivity and autonomy.** The autonomy level controls how much JARVIS does without asking: `off` disables all unprompted messages, `suggestions` (default) offers them, and `trusted` also skips the `/open` confirmation. Dangerous actions (shutdown, restart, screenshots, file writes) always require confirmation. Startup briefing, game detection, and break reminders each have their own toggle. Unprompted messages are never delivered during quiet hours (23:00–08:00) or while the window is hidden; the briefing is delivered the first time the window becomes visible. The built-in persona is versioned: upgrading JARVIS replaces an untouched default prompt but preserves a prompt you edited.
 
 ## Security model
 
@@ -171,6 +182,8 @@ Settings can be changed in the in-app Settings panel. The Ollama URL must be an 
 - Screen analysis requires a vision-capable model; text-only models cannot describe screenshots.
 - Weather, web search, and image generation depend on third-party services that may rate-limit or change. Image generation must be enabled in Settings first.
 - The global hotkey and the CoreAudio volume path are implemented but are not covered by automated tests; they need a real desktop session to verify.
+- Game detection is heuristic: a remembered executable is always recognized, while unknown games are inferred from a fullscreen or caption-less foreground window. Games that run windowed with a normal title bar are not detected until you run `/game add`. Detection never reads game memory or injects code, so it cannot know the in-game state.
+- Proactive messages and reminders fire only while JARVIS is running. They are queued in memory, not delivered by a separate service, and the startup briefing waits until the window is visible.
 - No signed installer or automatic updater is provided. `build/windows/installer/project.nsi` contains unsigned NSIS scaffolding. Copy `voice-engine` next to `Jarvis.exe` when deploying, or install it under `%AppData%\Jarvis\voice-engine`. Building the installer with `makensis -DBUNDLE_VOICE_ENGINE project.nsi` embeds the staged `build\bin\voice-engine` folder instead (the resulting installer is several gigabytes when models are included).
 - **Voice-engine checksums** only cover files listed in `checksums.json`; models are excluded unless the manifest is generated with `-all`.
 
@@ -178,35 +191,40 @@ Settings can be changed in the in-app Settings panel. The Ollama URL must be an 
 
 ```
 app.go                  Wails-bound application API and routing
-app_voice.go            Voice lifecycle, Russian actions, TTS, weather, second-instance commands
-voice_agent.go          Supervised background wake-word agent and supervisor
-main.go                 Wails entry point (--hidden, --voice-agent, --voice-agent-supervisor, --voice-wake)
+app_voice.go            Voice lifecycle, Russian/English actions, weather, second-instance commands
+proactive.go            Startup briefing, reminder delivery, quiet hours, model watchdog
+game.go                 Game session integration, /game command, break prompts
+voice_agent.go          Supervised background wake-word agent and supervisor (legacy mode)
+main.go                 Wails entry point (--hidden, --voice-agent, --voice-agent-supervisor, --voice-wake, --autostart-check)
 internal/applock        Foreground-app, background-agent, and supervisor mutexes
+internal/appscan        Application catalog: Start Menu, UWP, App Paths, Program Files
 internal/audit          Local audit log with 30-day retention
 internal/audio          Windows CoreAudio volume control
-internal/autostart      HKCU Run registration and legacy-mode migration
+internal/autostart      HKCU Run registration, StartupApproved repair, legacy-mode migration
 internal/browser        Headless page fetching and egress-filtering proxy
 internal/commands       Slash commands, allowlisted file operations, encrypted notes
-internal/config         Encrypted settings, corrupt-file backup, auto-start/image preferences
+internal/config         Encrypted settings, corrupt-file backup, auto-start/image/proactivity preferences
 internal/dpapi          DPAPI wrapper
+internal/gamewatch      Read-only foreground game detection, playtime, Game DVR merge
 internal/hotkey         Global hotkey registration
 internal/intent         Typed confirmation intents with TTL
 internal/ipc            Authenticated loopback command channel for the background agent
 internal/jobobject      Job object for child process cleanup
 internal/ollama         Ollama HTTP client
+internal/reminders      Persistent reminders and timers
 internal/safepath       Path allowlist and traversal protection
 internal/sanitize       Untrusted web content sanitization
 internal/setup          Hardware detection and model recommendation
 internal/tray           System tray icon and menu
-internal/tts            Piper/SAPI speech synthesis
 internal/voice          Phrase table and Windows PlaySound player
 internal/voiceengine    External engine/model path resolution and checksum verification
 internal/voiceinput     Microphone capture, VAD, Vosk wake word, Whisper transcription
 internal/weather        Open-Meteo forecast and geolocation
+internal/winwindow      Win32 window visibility check used for close-to-tray state
 tools/checksumgen       Voice-engine checksum manifest generator and verifier
 tools/ipcsend           Diagnostic command sender for the authenticated IPC channel
 voice/                  Bundled phrase WAV files copied to %AppData%\Jarvis\voice
-build/bin/voice-engine  Local Vosk/Whisper/Piper binaries and models (not embedded)
+build/bin/voice-engine  Local Vosk/Whisper binaries and models (not embedded)
 frontend/               Vue 3 + Vite UI
 website/                Static landing page
 ```
@@ -223,7 +241,7 @@ npm ci
 npm run build
 ```
 
-`npm run build` runs `vue-tsc --noEmit` before Vite, so TypeScript errors fail the build. `go test ./...` covers commands (including large-directory caps), encrypted config/history/notes with corrupt-file recovery, intents (including full URLs and search-style weather phrases), path safety, sanitization, the Ollama client, setup recommendations, audit logging and retention, app routing, weather parsing and response-size limits, stored-coordinate forecasts, voice-history sanitization, TTS text cleanup, browser URL safety and egress-proxy rejection, authenticated IPC delivery and tamper rejection, app/agent mutex behavior, voice-engine checksum verification, and voice phrase/assets handling.
+`npm run build` runs `vue-tsc --noEmit` before Vite, so TypeScript errors fail the build. `go test ./...` covers commands (including large-directory caps), the application catalog, encrypted config/history/notes with corrupt-file recovery, persona migration and autonomy normalization, Russian and English intents (including reminders, game intents, full URLs and search-style weather phrases), reminder persistence and corrupt-file recovery, path safety, sanitization, the Ollama client, setup recommendations, audit logging and retention, app routing, weather parsing and response-size limits, stored-coordinate forecasts, voice-history sanitization, transcript hallucination filtering, microphone diagnostics, browser URL safety and egress-proxy rejection, authenticated IPC delivery and tamper rejection, app/agent mutex behavior, voice-engine checksum verification, and voice phrase/assets handling. Run `go test -race ./...` for the concurrency check.
 
 Hardware and network checks are opt-in with the `manual` build tag, for example:
 

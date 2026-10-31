@@ -1,0 +1,26 @@
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@formkit/auto-animate": "^0.10.0",
+    "@vueuse/motion": "^3.0.3",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "@babel/types": "^7.26.0",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "autoprefixer": "^10.5.4",
+    "postcss": "^8.5.31",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^5.6.3",
+    "vite": "^7.0.0",
+    "vue-tsc": "^2.1.0"
+  }
+}

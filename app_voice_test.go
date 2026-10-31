@@ -105,7 +105,7 @@ func TestVoiceWeatherReusesStoredCoordinates(t *testing.T) {
 		IPURL:       server.URL + "/ip",
 	}
 
-	display, _, _ := app.voiceWeather(intent.VoiceAction{Kind: intent.VoiceWeather, Period: "today"})
+	display, _ := app.voiceWeather(intent.VoiceAction{Kind: intent.VoiceWeather, Period: "today"})
 	if strings.Contains(display, "Не удалось") {
 		t.Fatalf("weather request failed: %s", display)
 	}
@@ -116,9 +116,9 @@ func TestVoiceWeatherReusesStoredCoordinates(t *testing.T) {
 
 func TestDescribeConfirmedNoResults(t *testing.T) {
 	app := &App{}
-	_, speech := app.describeConfirmed(intent.Pending{Kind: intent.WebSearch}, "No results found.")
-	if speech != "Ничего не найдено, сэр." {
-		t.Fatalf("no-results speech = %q", speech)
+	display := app.describeConfirmed(intent.Pending{Kind: intent.WebSearch}, "No results found.")
+	if display != "No results found." {
+		t.Fatalf("no-results reply = %q", display)
 	}
 	if looksLikeError("No results found.") {
 		t.Fatal("an empty search must not be treated as an execution error")
