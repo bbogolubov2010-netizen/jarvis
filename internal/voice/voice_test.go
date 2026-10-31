@@ -20,6 +20,9 @@ func TestPhraseTableIsComplete(t *testing.T) {
 
 func TestVoiceAssetsExistAndArePCM(t *testing.T) {
 	root := filepath.Join("..", "..", "voice")
+	if _, err := os.Stat(filepath.Join(root, "greeting.wav")); os.IsNotExist(err) {
+		t.Skip("local voice pack is not checked in")
+	}
 	for _, name := range AllFiles() {
 		path := filepath.Join(root, name)
 		data, err := os.ReadFile(path)
@@ -45,8 +48,19 @@ func TestVoiceAssetsExistAndArePCM(t *testing.T) {
 	}
 }
 
+func writeFakePack(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range AllFiles() {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("fake wav"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
 func TestEnsureAssetsCopiesMissingFiles(t *testing.T) {
-	source := filepath.Join("..", "..", "voice")
+	source := writeFakePack(t)
 	dest := t.TempDir()
 
 	if err := EnsureAssets(dest, []string{source}); err != nil {
@@ -63,7 +77,7 @@ func TestEnsureAssetsCopiesMissingFiles(t *testing.T) {
 }
 
 func TestEnsureAssetsPreservesUserReplacement(t *testing.T) {
-	source := filepath.Join("..", "..", "voice")
+	source := writeFakePack(t)
 	dest := t.TempDir()
 	if err := EnsureAssets(dest, []string{source}); err != nil {
 		t.Fatalf("EnsureAssets: %v", err)
