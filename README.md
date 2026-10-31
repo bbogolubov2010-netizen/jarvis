@@ -149,7 +149,7 @@ All data stays under `%AppData%\Jarvis`:
 - `games.json` — remembered games and the last 30 days of per-game playtime. Only executable names, display names, and paths are stored.
 - `autostart-check.txt` — timestamp written by the **TEST START** self-check.
 - `*.corrupt-<timestamp>` — recoverable copy created before a corrupt settings or history file is replaced. The UI reports the backup path.
-- `voice\` — phrase WAV files copied from the bundled `voice` folder on first launch. The bundled folder is read from next to the executable (or the project root during development). Replace a file in the AppData copy to customize a phrase; existing files are never overwritten by the app.
+- `voice\` — phrase WAV files copied from the `voice` folder on first launch. The bundled folder is read from next to the executable (or the project root during development). The repository does not include the original sound pack for copyright reasons; add your own licensed WAVs to `voice\` before building. Replace a file in the AppData copy to customize a phrase; existing files are never overwritten by the app. Missing files are skipped silently.
 - `voice-engine\` — optional per-user copy of the local speech engines and models. The portable `build/bin/voice-engine` folder is preferred when present.
 - `voice-ipc.json` — DPAPI-protected endpoint and token for the authenticated loopback command channel. It is removed when the app exits.
 - `voice-agent.log` — background agent metadata and error log. Raw transcripts are redacted unless `JARVIS_VOICE_DEBUG=1` is set. It rotates to `voice-agent.log.1` at 1 MiB.
@@ -223,7 +223,7 @@ internal/weather        Open-Meteo forecast and geolocation
 internal/winwindow      Win32 window visibility check used for close-to-tray state
 tools/checksumgen       Voice-engine checksum manifest generator and verifier
 tools/ipcsend           Diagnostic command sender for the authenticated IPC channel
-voice/                  Bundled phrase WAV files copied to %AppData%\Jarvis\voice
+voice/                  Place your own licensed phrase WAV files here (not bundled)
 build/bin/voice-engine  Local Vosk/Whisper binaries and models (not embedded)
 frontend/               Vue 3 + Vite UI
 website/                Static landing page

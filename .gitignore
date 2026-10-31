@@ -11,6 +11,9 @@ build/bin/
 *.bin
 voice-engine/
 
+# --- Copyrighted local sound pack (not redistributed) ---
+voice/*.wav
+
 # --- Legacy nested copy (keep out of the published tree) ---
 /jarvis/
 
