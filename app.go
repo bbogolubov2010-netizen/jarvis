@@ -574,6 +574,7 @@ func (a *App) windowIsVisible() bool {
 type StatusInfo struct {
 	Model         string `json:"model"`
 	Provider      string `json:"provider"`
+	Version       string `json:"version"`
 	GoVersion     string `json:"goVersion"`
 	OllamaRunning bool   `json:"ollama_running"`
 	OllamaURL     string `json:"ollama_url"`
@@ -603,6 +604,7 @@ func (a *App) GetSystemStatus() StatusInfo {
 	return StatusInfo{
 		Model:         a.ollama.Model(),
 		Provider:      provider,
+		Version:       appVersion(),
 		GoVersion:     runtime.Version(),
 		OllamaRunning: running,
 		OllamaURL:     a.ollama.BaseURL(),
@@ -2021,16 +2023,31 @@ func (a *App) ScanApplications() (int, error) {
 	return len(catalog.Apps), nil
 }
 
-// LaunchApp starts a detected application by name.
+// LaunchApp starts a curated sidebar application by name. The sidebar is
+// backed by DetectApps, so a name outside that list is rejected instead of
+// falling through to the full scanned catalogue.
 func (a *App) LaunchApp(name string) string {
-	a.playVoice(voice.KeyLoading)
-	result := commands.LaunchByName(name)
-	if looksLikeError(result) {
-		a.playVoice(voice.KeyError)
-	} else {
-		a.playVoice(voice.KeySetupReady)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "Usage: /open <appname> - opens an application."
 	}
-	return result
+	for _, app := range commands.DetectApps() {
+		if !strings.EqualFold(app.Name, name) {
+			continue
+		}
+		audit.LogOpen(app.Name)
+		a.playVoice(voice.KeyLoading)
+		result := commands.LaunchApp(app)
+		if looksLikeError(result) {
+			a.playVoice(voice.KeyError)
+		} else {
+			a.playVoice(voice.KeySetupReady)
+		}
+		return result
+	}
+	audit.LogDenied("LAUNCH", "application is not in the curated sidebar list: "+name)
+	a.playVoice(voice.KeyError)
+	return fmt.Sprintf("Unknown application: %s", name)
 }
 
 // OpenExternal opens an http(s) URL in the user's default browser.

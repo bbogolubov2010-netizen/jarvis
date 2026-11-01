@@ -100,7 +100,7 @@ interface MicrophoneDiagnostics {
   hints: string[]
   error: string
 }
-interface AppStatus { model: string; provider: string; goVersion: string; ollama_running: boolean; ollama_url: string; hotkey_active: boolean; hotkey_error: string; history_error: string; settings_error: string }
+interface AppStatus { model: string; provider: string; version: string; goVersion: string; ollama_running: boolean; ollama_url: string; hotkey_active: boolean; hotkey_error: string; history_error: string; settings_error: string }
 interface GPUInfo { name: string; vendor: string; vram_gb: number; integrated: boolean }
 interface SetupInfo {
   ram_gb: number
@@ -171,6 +171,8 @@ declare global {
           GetSystemStatus(): Promise<AppStatus>
           GetAvailableModels(): Promise<string[]>
           GetHistory(): Promise<HistoryMessage[]>
+          GetConfigDir(): Promise<string>
+          GetVersion(): Promise<string>
           GetSettings(): Promise<Settings>
           SaveSettings(settings: Settings): Promise<void>
           PlayVoicePhrase(key: string): Promise<boolean>
@@ -291,7 +293,7 @@ const settings = ref<Settings>({
   system_prompt_customized: false
 })
 const availableModels = ref<string[]>([])
-const status = ref<AppStatus>({ model: '', provider: '', goVersion: '', ollama_running: false, ollama_url: '', hotkey_active: false, hotkey_error: '', history_error: '', settings_error: '' })
+const status = ref<AppStatus>({ model: '', provider: '', version: '', goVersion: '', ollama_running: false, ollama_url: '', hotkey_active: false, hotkey_error: '', history_error: '', settings_error: '' })
 const settingsError = ref('')
 const modelOptions = computed(() => {
   const models = [...availableModels.value]
@@ -1432,6 +1434,7 @@ onUnmounted(() => {
               <span>{{ status.provider || 'Disconnected' }}</span>
             </div>
             <div>{{ status.model }}</div>
+            <div v-if="status.version" class="text-gray-700">v{{ status.version }}</div>
           </div>
         </div>
       </aside>

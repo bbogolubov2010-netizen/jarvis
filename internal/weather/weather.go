@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"Jarvis/internal/netguard"
 )
 
 const (
@@ -70,7 +72,7 @@ type Client struct {
 // NewClient returns a client with sane network timeouts.
 func NewClient() *Client {
 	return &Client{
-		HTTP:        &http.Client{Timeout: 15 * time.Second},
+		HTTP:        netguard.NewClient(15 * time.Second),
 		ForecastURL: defaultForecastURL,
 		GeoURL:      defaultGeoURL,
 		IPURL:       defaultIPURL,
@@ -356,7 +358,7 @@ func (c *Client) getJSON(ctx context.Context, rawURL string, target any) error {
 	req.Header.Set("User-Agent", "Jarvis/1.0 (local desktop assistant)")
 	client := c.HTTP
 	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+		client = netguard.NewClient(15 * time.Second)
 	}
 	resp, err := client.Do(req)
 	if err != nil {

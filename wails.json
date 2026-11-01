@@ -7,7 +7,14 @@
   "frontend:dev:watcher": "npm run dev",
   "frontend:dev:serverUrl": "auto",
   "author": {
-    "name": "",
+    "name": "JARVIS Contributors",
     "email": ""
+  },
+  "info": {
+    "companyName": "JARVIS Contributors",
+    "productName": "JARVIS",
+    "productVersion": "0.1.0",
+    "copyright": "Copyright © 2026 JARVIS Contributors",
+    "comments": "Local-first AI desktop assistant for Windows"
   }
 }

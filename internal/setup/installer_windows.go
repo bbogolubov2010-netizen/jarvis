@@ -14,6 +14,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"Jarvis/internal/netguard"
 )
 
 const (
@@ -24,6 +26,10 @@ const (
 	// The installer is currently about 1.6 GB; keep a generous hard limit.
 	maxInstallerBytes      = int64(3 << 30)
 	expectedInstallerBytes = int64(1_700_000_000)
+
+	// Ollama's download endpoint redirects through GitHub. Keep the same
+	// limit as netguard and require HTTPS at every hop.
+	maxInstallerRedirects = 5
 )
 
 // InstallProgress is sent to the UI while Ollama is being installed.
@@ -166,6 +172,31 @@ func downloadAndInstall(ctx context.Context, progress func(InstallProgress)) err
 	return nil
 }
 
+// newInstallerClient returns a no-deadline client that still refuses
+// non-public destinations. The installer is large and must be allowed to take
+// its time, but every hop has to be a public HTTPS address.
+func newInstallerClient() *http.Client {
+	client := netguard.NewClient(0)
+	client.CheckRedirect = installerRedirect
+	return client
+}
+
+// installerRedirect enforces the installer-specific redirect policy. It is
+// stricter than netguard's default because the Ollama download endpoint must
+// never downgrade to plain HTTP.
+func installerRedirect(req *http.Request, via []*http.Request) error {
+	if req.URL.Scheme != "https" {
+		return fmt.Errorf("installer redirect is not HTTPS")
+	}
+	if len(via) >= maxInstallerRedirects {
+		return fmt.Errorf("too many installer redirects")
+	}
+	if !netguard.IsPublicURL(req.Context(), req.URL.String()) {
+		return fmt.Errorf("installer redirect is not a public address")
+	}
+	return nil
+}
+
 func downloadInstaller(ctx context.Context, progress func(InstallProgress)) (string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, OllamaInstallerURL, nil)
 	if err != nil {
@@ -173,18 +204,7 @@ func downloadInstaller(ctx context.Context, progress func(InstallProgress)) (str
 	}
 	request.Header.Set("User-Agent", "Jarvis/1.0 (Windows)")
 
-	client := &http.Client{
-		Timeout: 0,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if req.URL.Scheme != "https" {
-				return fmt.Errorf("installer redirect is not HTTPS")
-			}
-			if len(via) >= 10 {
-				return fmt.Errorf("too many installer redirects")
-			}
-			return nil
-		},
-	}
+	client := newInstallerClient()
 	response, err := client.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("download installer: %w", err)

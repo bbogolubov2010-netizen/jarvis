@@ -157,8 +157,20 @@ func CatalogApps() []InstalledApp {
 	return apps
 }
 
-// LaunchApp starts a detected application.
+// LaunchApp starts a detected application. The path is re-validated here even
+// though DetectApps built the list, so a catalogue or settings file cannot
+// smuggle in an arbitrary target.
 func LaunchApp(app InstalledApp) string {
+	if !filepath.IsAbs(app.Path) {
+		return fmt.Sprintf("Failed to launch %s: application path is not absolute", app.Name)
+	}
+	info, err := os.Stat(app.Path)
+	if err != nil {
+		return fmt.Sprintf("Failed to launch %s: %s", app.Name, err)
+	}
+	if info.IsDir() {
+		return fmt.Sprintf("Failed to launch %s: application path is a directory", app.Name)
+	}
 	command := exec.Command(app.Path, app.Args...)
 	if err := command.Start(); err != nil {
 		return fmt.Sprintf("Failed to launch %s: %s", app.Name, err)

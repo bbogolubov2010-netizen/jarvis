@@ -563,6 +563,7 @@ func (a *App) voiceOpenApp(name string) (string, bool) {
 	if target, ok := voiceSiteURLs[strings.ToLower(name)]; ok {
 		return a.voiceOpenURL(target)
 	}
+	audit.LogOpen(name)
 	result := commands.LaunchByName(name)
 	if looksLikeError(result) {
 		message := fmt.Sprintf("Не удалось открыть %s, сэр.", name)

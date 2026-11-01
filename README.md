@@ -4,7 +4,7 @@ JARVIS is a local-first AI desktop assistant for Windows, built with Go, [Wails 
 
 The AI model runs on your machine through Ollama. JARVIS has no telemetry, no account system, and no cloud AI backend. Optional network features are weather/geolocation (Open-Meteo), web search (DuckDuckGo), and image generation (Pollinations.ai).
 
-> Status: the project builds and the command layer is covered by tests. There is no signed installer or automatic updater yet. Build from source using the instructions below.
+> Status: version `0.1.0`. The project builds, the command layer is covered by tests, and Windows builds report their version in the sidebar and through `App.GetVersion()`. There is no signed installer or automatic updater yet. Build from source using the instructions below.
 
 ## Features
 
@@ -26,7 +26,7 @@ The AI model runs on your machine through Ollama. JARVIS has no telemetry, no ac
 - **Local weather**: Open-Meteo forecasts with a one-time location prompt, IP geolocation, and Russian city-name normalization.
 - **Audit log** of actions and confirmations, stored locally and pruned after 30 days.
 - **DPAPI-encrypted settings, history, and notes** at rest.
-- **Optional voice-engine checksum verification** with a generated `checksums.json` manifest.
+- **Optional voice-engine checksum verification** with a generated `checksums.json` manifest split into startup binaries and on-demand models.
 
 ## Requirements
 
@@ -57,10 +57,10 @@ The AI model runs on your machine through Ollama. JARVIS has no telemetry, no ac
    npm ci
    npm run build
    cd ..
-   wails build
+   wails build -ldflags "-linkmode=internal"
    ```
 
-   The executable is written to `build/bin/Jarvis.exe`. A plain `go build` also works once `frontend/dist` exists.
+   The executable is written to `build/bin/Jarvis.exe`. `-linkmode=internal` selects Go's internal linker and avoids the MinGW `.rsrc merge failure: multiple non-default manifests` warning, which Wails otherwise prints even though it still produces a working executable. To stamp a release version, extend the flags: `wails build -ldflags "-linkmode=internal -X main.version=1.2.3"`. A plain `go build` also works once `frontend/dist` exists.
 
 4. Run `build/bin/Jarvis.exe`. On first launch, JARVIS checks Ollama, recommends a model based on available RAM, and offers to pull it. Settings, chat history, notes, and logs are stored in `%AppData%\Jarvis`.
 
@@ -86,14 +86,23 @@ To keep JARVIS available at every logon, enable **Auto-start with Windows** in S
 
 ### Voice engine integrity (optional)
 
-`checksums.json` in the engine root enables SHA-256 verification of the core executables and DLLs:
+`checksums.json` in the engine root enables SHA-256 verification. The manifest has two sections so startup stays fast:
+
+- `files` — the 17 core executables and DLLs loaded every time voice input starts (`libvosk.dll`, `whisper/whisper-cli.exe`, `whisper/whisper.dll`, `whisper/ggml.dll`, and the MinGW runtimes). Checked by `Verify()` at startup.
+- `on_demand` — Vosk models and large optional runtimes (CUDA DLLs, Whisper `.bin` models, 64 MB and above). Checked only by `VerifyOnDemand()` before that engine is used.
 
 ```powershell
+# Generate/refresh the manifest (large files are classified automatically).
 go run ./tools/checksumgen -root build\bin\voice-engine
+
+# Verify the startup binaries only (fast).
 go run ./tools/checksumgen -root build\bin\voice-engine -verify
+
+# Verify models and large runtimes as well (slow: reads ~3 GB).
+go run ./tools/checksumgen -root build\bin\voice-engine -verify-on-demand
 ```
 
-The default manifest covers `libvosk.dll`, `whisper/whisper-cli.exe`, `whisper/whisper.dll`, and `whisper/ggml.dll`. Add `-all` to hash every file under the engine root, including the Whisper models; this makes startup verification noticeably slower. A missing manifest is accepted for backward compatibility. Set `JARVIS_VOICE_REQUIRE_CHECKSUMS=1` to make it mandatory. If a listed file is missing or does not match, the UI reports the failure and voice input stays disabled; the background agent re-checks a failing engine once a minute so it can be repaired without a restart.
+`-all` moves every file into the startup section instead; avoid it for normal releases because hashing the large models on every start adds seconds to voice startup. A missing manifest is accepted for backward compatibility. Set `JARVIS_VOICE_REQUIRE_CHECKSUMS=1` to make it mandatory. Manifest paths must stay inside the engine root. If a listed file is missing or does not match, the UI reports the failure and voice input stays disabled; the background agent re-checks a failing engine once a minute so it can be repaired without a restart.
 
 ## Development
 
@@ -168,7 +177,8 @@ Settings can be changed in the in-app Settings panel. The Ollama URL must be an 
 - **Authenticated background-agent IPC.** The agent launches the app without command-line payloads and delivers commands over a random loopback port. Requests are HMAC-SHA256 signed with a DPAPI-protected token, checked against a 30-second clock window, and deduplicated by nonce.
 - **Browser egress filtering.** Chromium uses a loopback proxy that resolves each destination and rejects private, loopback, link-local, carrier-grade NAT, documentation, and other non-public addresses, including DNS-rebinding and redirect targets. Only ports 80 and 443 are allowed. Direct web requests (`/search`, the `/smart` fallback, and image generation) use the same public-IP validation in their HTTP transport, so a redirect cannot reach a local service.
 - **Image generation is opt-in.** Prompts are sent to Pollinations.ai only after the user enables image generation in Settings.
-- **Optional voice-engine checksums.** A generated manifest detects modified or missing core speech binaries before the microphone is used.
+- **Optional voice-engine checksums.** A generated manifest detects modified or missing core speech binaries before the microphone is used, and verifies models separately only when they are loaded.
+- **Curated app launching.** `/open` and the sidebar only launch entries from the detected application catalog. A path is re-validated as absolute, existing, and a file; arbitrary paths or names are rejected and audit-logged.
 - **Audit log** of actions and confirmations, retained for 30 days.
 - **No telemetry.** JARVIS does not send analytics or usage data anywhere.
 - **Network boundaries:** Ollama listens locally by default. Weather and first-launch geolocation use Open-Meteo; web search sends the query to DuckDuckGo; image generation sends the prompt to Pollinations.ai only when opted in. These features are optional and clearly labeled in the UI.
@@ -185,17 +195,19 @@ Settings can be changed in the in-app Settings panel. The Ollama URL must be an 
 - Game detection is heuristic: a remembered executable is always recognized, while unknown games are inferred from a fullscreen or caption-less foreground window. Games that run windowed with a normal title bar are not detected until you run `/game add`. Detection never reads game memory or injects code, so it cannot know the in-game state.
 - Proactive messages and reminders fire only while JARVIS is running. They are queued in memory, not delivered by a separate service, and the startup briefing waits until the window is visible.
 - No signed installer or automatic updater is provided. `build/windows/installer/project.nsi` contains unsigned NSIS scaffolding. Copy `voice-engine` next to `Jarvis.exe` when deploying, or install it under `%AppData%\Jarvis\voice-engine`. Building the installer with `makensis -DBUNDLE_VOICE_ENGINE project.nsi` embeds the staged `build\bin\voice-engine` folder instead (the resulting installer is several gigabytes when models are included).
-- **Voice-engine checksums** only cover files listed in `checksums.json`; models are excluded unless the manifest is generated with `-all`.
+- **Voice-engine checksums** cover exactly the files listed in `checksums.json`: startup binaries in `files`, models and large runtimes in `on_demand`. Run `checksumgen` again after replacing any engine file.
 
 ## Project structure
 
 ```
 app.go                  Wails-bound application API and routing
 app_voice.go            Voice lifecycle, Russian/English actions, weather, second-instance commands
+version.go              Build version, App.GetVersion, sidebar status
 proactive.go            Startup briefing, reminder delivery, quiet hours, model watchdog
 game.go                 Game session integration, /game command, break prompts
 voice_agent.go          Supervised background wake-word agent and supervisor (legacy mode)
 main.go                 Wails entry point (--hidden, --voice-agent, --voice-agent-supervisor, --voice-wake, --autostart-check)
+bindings_test.go        Fails when an exported App method is missing from the App.vue bindings
 internal/applock        Foreground-app, background-agent, and supervisor mutexes
 internal/appscan        Application catalog: Start Menu, UWP, App Paths, Program Files
 internal/audit          Local audit log with 30-day retention
@@ -242,7 +254,7 @@ npm ci
 npm run build
 ```
 
-`npm run build` runs `vue-tsc --noEmit` before Vite, so TypeScript errors fail the build. `go test ./...` covers commands (including large-directory caps), the application catalog, encrypted config/history/notes with corrupt-file recovery, persona migration and autonomy normalization, Russian and English intents (including reminders, game intents, full URLs and search-style weather phrases), reminder persistence and corrupt-file recovery, path safety, sanitization, the Ollama client, setup recommendations, audit logging and retention, app routing, weather parsing and response-size limits, stored-coordinate forecasts, voice-history sanitization, transcript hallucination filtering, microphone diagnostics, browser URL safety and egress-proxy rejection, direct-request public-address validation, authenticated IPC delivery and tamper rejection, app/agent mutex behavior, voice-engine checksum verification, and voice phrase/assets handling. Run `go test -race ./...` for the concurrency check.
+`npm run build` runs `vue-tsc --noEmit` before Vite, so TypeScript errors fail the build. `go test ./...` covers commands (including large-directory caps and launch-path validation), the application catalog, encrypted config/history/notes with corrupt-file recovery, persona migration and autonomy normalization, Russian and English intents (including reminders, game intents, full URLs and search-style weather phrases), reminder persistence and corrupt-file recovery, path safety, sanitization, the Ollama client, setup recommendations, installer redirect policy, audit logging and retention, app routing, weather parsing and response-size limits, stored-coordinate forecasts, voice-history sanitization, transcript hallucination filtering, microphone diagnostics, browser URL safety and egress-proxy rejection, direct-request public-address validation, authenticated IPC delivery and tamper rejection, app/agent mutex behavior, voice-engine startup and on-demand checksum verification, missing frontend bindings, and voice phrase/assets handling. Run `go test -race ./...` for the concurrency check.
 
 Hardware and network checks are opt-in with the `manual` build tag, for example:
 
