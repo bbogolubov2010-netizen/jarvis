@@ -109,6 +109,13 @@ type chatCanceledEvent struct {
 }
 
 // App is the Wails-bound application object.
+//
+// Lock order: settingsMu may be held while taking stateMu; stateMu is a leaf
+// after that. Never take settingsMu or setupMu while holding stateMu. History
+// writes hold historyMu and take stateMu briefly to snapshot the conversation.
+// Voice state is guarded by voiceMu; callbacks must not call back into voiceMu
+// while it is held. Keep new lock acquisitions inside a single service when
+// possible instead of nesting more of these mutexes.
 type App struct {
 	ctx      context.Context
 	ctxReady chan struct{}
@@ -163,6 +170,9 @@ type App struct {
 	visibleMu sync.Mutex
 	visible   bool
 
+	screenConsentMu    sync.Mutex
+	screenConsentUntil time.Time
+
 	browserMu     sync.Mutex
 	browserAlloc  context.Context
 	browserCancel context.CancelFunc
@@ -182,7 +192,7 @@ type App struct {
 
 // NewApp loads configuration and prepares dependencies.
 func NewApp(startHidden bool) *App {
-	settings, found, err := config.Load(configPath())
+	settings, found, plaintext, err := config.LoadDetailed(configPath())
 	settingsError := ""
 	if err != nil {
 		backup, backupErr := config.BackupCorrupt(configPath())
@@ -192,13 +202,35 @@ func NewApp(startHidden bool) *App {
 		} else if backupErr != nil {
 			settingsError += "\nCould not create a recovery copy: " + backupErr.Error()
 		}
-		fmt.Fprintf(os.Stderr, "settings: %v (using defaults)\n", err)
+		appLog("settings: %v (using defaults)", err)
 	}
 	if !found || err != nil {
 		if ram, ramErr := setup.TotalRAMGB(); ramErr == nil {
 			if recommendation := setup.RecommendModel(ram); recommendation != nil {
 				settings.Model = recommendation.Model
 			}
+		}
+	}
+	needsRewrite := false
+	if _, urlErr := ollama.ValidateBaseURL(settings.OllamaURL); urlErr != nil {
+		// NewClient silently falls back to the default URL. Surface the problem
+		// in Settings instead of leaving the user with a mysterious offline app.
+		settings.OllamaURL = ollama.DefaultBaseURL
+		if settingsError != "" {
+			settingsError += "\n"
+		}
+		settingsError += "Saved Ollama endpoint was reset: " + urlErr.Error()
+		appLog("settings: %v", urlErr)
+		needsRewrite = found && err == nil
+	}
+	if plaintext {
+		// Legacy plaintext settings are migrated on the next start. Leaving
+		// them readable would let anyone with file access modify the model URL.
+		needsRewrite = true
+	}
+	if needsRewrite {
+		if saveErr := config.Save(configPath(), settings); saveErr != nil {
+			appLog("settings: rewrite: %v", saveErr)
 		}
 	}
 
@@ -316,49 +348,49 @@ func (a *App) startup(ctx context.Context) {
 	pruneImageDir(filepath.Join(os.TempDir(), "jarvis_images"))
 
 	if alloc, cancel, err := browser.NewAllocator(); err != nil {
-		fmt.Fprintf(os.Stderr, "browser allocator: %v\n", err)
+		appLog("browser allocator: %v", err)
 	} else {
 		a.browserAlloc = alloc
 		a.browserCancel = cancel
 	}
 
 	if err := browser.InitJobObject(); err != nil {
-		fmt.Fprintf(os.Stderr, "browser job object: %v\n", err)
+		appLog("browser job object: %v", err)
 	}
 	if err := audit.Init(a.GetConfigDir()); err != nil {
-		fmt.Fprintf(os.Stderr, "audit: %v\n", err)
+		appLog("audit: %v", err)
 	}
 	if release, alreadyRunning, err := applock.Create(); err != nil {
-		fmt.Fprintf(os.Stderr, "app lock: %v\n", err)
+		appLog("app lock: %v", err)
 	} else if alreadyRunning {
 		release()
-		fmt.Fprintln(os.Stderr, "another JARVIS instance is already running")
+		appLog("another JARVIS instance is already running")
 		wruntime.Quit(a.ctx)
 		return
 	} else {
 		a.instanceRelease = release
 	}
 	if err := commands.InitNotes(filepath.Join(a.GetConfigDir(), "notes.json")); err != nil {
-		fmt.Fprintf(os.Stderr, "notes: %v\n", err)
+		appLog("notes: %v", err)
 	}
 	if store, err := reminders.New(filepath.Join(a.GetConfigDir(), "reminders.json")); err != nil {
-		fmt.Fprintf(os.Stderr, "reminders: %v\n", err)
+		appLog("reminders: %v", err)
 	} else {
 		a.reminders = store
 	}
 	if watcher, err := gamewatch.New(filepath.Join(a.GetConfigDir(), "games.json")); err != nil {
-		fmt.Fprintf(os.Stderr, "game watch: %v\n", err)
+		appLog("game watch: %v", err)
 	} else {
 		a.game = watcher
 	}
 	a.gameAsked = make(map[string]bool)
 	a.voice = voice.NewPlayer(a.voiceDirs(), a.voiceEnabled)
 	if err := voice.EnsureAssets(a.voiceDir(), a.voiceSourceDirs()); err != nil {
-		fmt.Fprintf(os.Stderr, "voice: %v\n", err)
+		appLog("voice: %v", err)
 	}
 	paths := voiceengine.Resolve()
 	if err := a.verifyVoiceEngine(paths); err != nil {
-		fmt.Fprintf(os.Stderr, "voice engine integrity: %v\n", err)
+		appLog("voice engine integrity: %v", err)
 	}
 	if a.visible {
 		greeting := voice.KeyGreeting
@@ -369,7 +401,7 @@ func (a *App) startup(ctx context.Context) {
 	}
 
 	if err := hotkey.Start(1, hotkey.MOD_CONTROL|hotkey.MOD_SHIFT|hotkey.MOD_NOREPEAT, hotkey.VK_J, a.toggleWindow); err != nil {
-		fmt.Fprintf(os.Stderr, "global hotkey: %v\n", err)
+		appLog("global hotkey: %v", err)
 		a.stateMu.Lock()
 		a.hotkeyError = err.Error()
 		a.stateMu.Unlock()
@@ -382,7 +414,7 @@ func (a *App) startup(ctx context.Context) {
 	a.ctxOnce.Do(func() { close(a.ctxReady) })
 
 	if server, err := ipc.Start(a.GetConfigDir(), a.handleIncomingVoice); err != nil {
-		fmt.Fprintf(os.Stderr, "voice IPC: %v\n", err)
+		appLog("voice IPC: %v", err)
 	} else {
 		a.ipcServer = server
 	}
@@ -391,7 +423,7 @@ func (a *App) startup(ctx context.Context) {
 	go tray.Run(a.getTrayCallbacks())
 	go func() {
 		if err := appscan.RefreshIfStale(context.Background(), 24*time.Hour); err != nil {
-			fmt.Fprintf(os.Stderr, "app scan: %v\n", err)
+			appLog("app scan: %v", err)
 			return
 		}
 		a.emitEvent("apps:updated", map[string]any{"count": len(appscan.Cached().Apps)})
@@ -414,7 +446,7 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 	a.cancelAllStreams()
 	if !waitForStreams(&a.streamWG, streamShutdownTimeout) {
-		fmt.Fprintln(os.Stderr, "shutdown: timed out waiting for chat streams")
+		appLog("shutdown: timed out waiting for chat streams")
 	}
 	if a.voice != nil {
 		a.voice.Stop()
@@ -483,10 +515,10 @@ func (a *App) showWindowSilent() {
 	go a.deliverBriefingIfVisible()
 }
 
-const onboardingTip = "Сэр, все системы в норме. Я работаю на полную мощность: открываю любые приложения, " +
-	"считаю погоду, ищу в сети и анализирую экран — с вашего разрешения. Осталось подключить голос: " +
-	"включите микрофон и скажите «Привет, Джарвис» или «Hey Jarvis» — я понимаю оба языка. " +
-	"Без микрофона я тоже рядом: напишите здесь или нажмите Ctrl+Shift+J."
+const onboardingTip = "Sir, all systems are nominal. I am operating at full capacity: launching applications, " +
+	"checking the weather, searching the web, and analysing the screen — with your permission. Only voice remains: " +
+	"enable the microphone and say «Привет, Джарвис» or «Hey Jarvis» — I understand both languages. " +
+	"Without a microphone I am still here: type below or press Ctrl+Shift+J."
 
 // GetOnboardingTip returns the first-launch tip once and marks it as delivered.
 // It returns an empty string while the window is hidden or after the tip has
@@ -702,8 +734,8 @@ func (a *App) routeInput(text string) routedInput {
 	}
 
 	if result, handled := a.cmd.Process(text); handled {
-		switch result {
-		case commands.ResultClearChat:
+		switch result.Kind {
+		case commands.KindClearChat:
 			if err := a.persistClearedHistory(); err != nil {
 				a.playVoice(voice.KeyError)
 				return routedInput{handled: true, direct: fmt.Sprintf("Could not clear saved history: %s", err)}
@@ -712,38 +744,38 @@ func (a *App) routeInput(text string) routedInput {
 			audit.LogCommand(commandName(text), "")
 			a.playVoice(voice.KeyAck)
 			return routedInput{handled: true, direct: "Chat cleared, Sir.", clearHistory: true}
-		case commands.ResultScreenshotConfirm:
+		case commands.KindScreenshotConfirm:
 			a.intents.Set(intent.Screenshot, "")
 			a.playVoice(voice.KeyScreenshotConfirm)
 			return routedInput{handled: true, direct: "Sir, may I take a screenshot? Type YES to confirm."}
-		case commands.ResultShutdownConfirm:
+		case commands.KindShutdownConfirm:
 			a.intents.Set(intent.Shutdown, "")
 			a.playVoice(voice.KeyAck)
 			return routedInput{handled: true, direct: "Are you sure you want to shut down the system? Type YES to confirm."}
-		case commands.ResultRestartConfirm:
+		case commands.KindRestartConfirm:
 			a.intents.Set(intent.Restart, "")
 			a.playVoice(voice.KeyAck)
 			return routedInput{handled: true, direct: "Are you sure you want to restart? Type YES to confirm."}
-		case commands.ResultListReminders:
+		case commands.KindListReminders:
 			return routedInput{handled: true, direct: a.listReminders()}
+		case commands.KindRemind:
+			a.playVoice(voice.KeyAck)
+			return routedInput{handled: true, direct: a.handleRemindCommand(result.Text)}
+		case commands.KindTimer:
+			a.playVoice(voice.KeyAck)
+			return routedInput{handled: true, direct: a.handleTimerCommand(result.Text)}
+		case commands.KindGame:
+			return routedInput{handled: true, direct: a.handleGameCommand(result.Text)}
 		default:
-			if strings.HasPrefix(result, commands.ResultRemindPrefix) {
-				args := strings.TrimSpace(strings.TrimPrefix(result, commands.ResultRemindPrefix))
-				a.playVoice(voice.KeyAck)
-				return routedInput{handled: true, direct: a.handleRemindCommand(args)}
-			}
-			if strings.HasPrefix(result, commands.ResultTimerPrefix) {
-				args := strings.TrimSpace(strings.TrimPrefix(result, commands.ResultTimerPrefix))
-				a.playVoice(voice.KeyAck)
-				return routedInput{handled: true, direct: a.handleTimerCommand(args)}
-			}
-			if strings.HasPrefix(result, commands.ResultGamePrefix) {
-				args := strings.TrimSpace(strings.TrimPrefix(result, commands.ResultGamePrefix))
-				return routedInput{handled: true, direct: a.handleGameCommand(args)}
-			}
 			audit.LogCommand(commandName(text), "")
 			a.playVoice(voiceForCommand(text, result))
-			return routedInput{handled: true, direct: result}
+			// The frontend detects generated images by this stable prefix. Keep
+			// it in the reply while the command package exposes a typed kind.
+			reply := result.Text
+			if result.Kind == commands.KindImageSaved {
+				reply = commands.ResultImageSavedPrefix + result.Text
+			}
+			return routedInput{handled: true, direct: reply}
 		}
 	}
 
@@ -1052,9 +1084,42 @@ func (a *App) GenerateImage(prompt, size string) string {
 	return result
 }
 
+// ApproveScreenCapture records explicit user consent for one screen capture.
+// Consent is short-lived and consumed by ProcessWithScreen, so a compromised
+// renderer cannot reuse it for a second capture.
+func (a *App) ApproveScreenCapture() bool {
+	return a.grantScreenConsent(2 * time.Minute)
+}
+
+func (a *App) grantScreenConsent(ttl time.Duration) bool {
+	if ttl <= 0 {
+		ttl = 2 * time.Minute
+	}
+	a.screenConsentMu.Lock()
+	a.screenConsentUntil = time.Now().Add(ttl)
+	a.screenConsentMu.Unlock()
+	return true
+}
+
+func (a *App) consumeScreenConsent() bool {
+	a.screenConsentMu.Lock()
+	defer a.screenConsentMu.Unlock()
+	if a.screenConsentUntil.IsZero() || time.Now().After(a.screenConsentUntil) {
+		a.screenConsentUntil = time.Time{}
+		return false
+	}
+	a.screenConsentUntil = time.Time{}
+	return true
+}
+
 // ProcessWithScreen captures the screen and asks a vision model about it.
-// The UI must obtain explicit user consent before calling this method.
+// The UI must call ApproveScreenCapture first; consent is enforced here so a
+// renderer bug cannot silently capture the screen.
 func (a *App) ProcessWithScreen(text string) string {
+	if !a.consumeScreenConsent() {
+		a.playVoice(voice.KeyError)
+		return "Screen analysis requires explicit confirmation, Sir."
+	}
 	text = strings.TrimSpace(text)
 	if text == "" {
 		text = "Describe what is on the screen."
@@ -1250,11 +1315,31 @@ func (a *App) SaveSettings(settings config.Settings) error {
 	}
 	a.stateMu.Unlock()
 	a.syncAutoStart()
-	go func() {
-		_ = a.restartVoiceInput()
+	if voiceSettingsChanged(previous, settings) {
+		go func() {
+			_ = a.restartVoiceInput()
+			a.playVoice(voice.KeyAsYouWish)
+		}()
+	} else {
 		a.playVoice(voice.KeyAsYouWish)
-	}()
+	}
 	return nil
+}
+
+// voiceSettingsChanged reports whether a settings change affects the
+// microphone or the voice engine. Unrelated settings (model, weather location,
+// autonomy) must not restart the microphone and interrupt listening.
+func voiceSettingsChanged(previous, next config.Settings) bool {
+	return previous.VoiceDisabled != next.VoiceDisabled ||
+		previous.VoiceInputDisabled != next.VoiceInputDisabled ||
+		previous.WakeWordDisabled != next.WakeWordDisabled ||
+		previous.VoiceConfirmDangerousDisabled != next.VoiceConfirmDangerousDisabled ||
+		previous.VoiceAgentDisabled != next.VoiceAgentDisabled ||
+		previous.VoiceWakeWord != next.VoiceWakeWord ||
+		previous.VoiceLanguage != next.VoiceLanguage ||
+		previous.VoiceDeviceID != next.VoiceDeviceID ||
+		previous.VoiceDeviceName != next.VoiceDeviceName ||
+		previous.VoiceWhisperModel != next.VoiceWhisperModel
 }
 
 func (a *App) resetHistory() {
@@ -1349,7 +1434,7 @@ func (a *App) loadHistory() {
 		return
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "history: %v (starting with a new chat)\n", err)
+		appLog("history: %v (starting with a new chat)", err)
 		message := "Saved chat history could not be loaded: " + err.Error()
 		if backup := a.backupCorruptHistory(); backup != "" {
 			message += "\nRecoverable copies: " + backup
@@ -1360,7 +1445,7 @@ func (a *App) loadHistory() {
 	}
 	a.setHistoryError("")
 	if source == "backup" {
-		fmt.Fprintf(os.Stderr, "history: restored from %s\n", a.historyPath+".bak")
+		appLog("history: restored from %s", a.historyPath+".bak")
 	}
 
 	a.stateMu.Lock()
@@ -1389,7 +1474,7 @@ func (a *App) backupCorruptHistory() string {
 		}
 		backup, err := config.BackupCorrupt(path)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "history backup %s: %v\n", path, err)
+			appLog("history backup %s: %v", path, err)
 			continue
 		}
 		if backup != "" {
@@ -1554,9 +1639,9 @@ func (a *App) persistClearedHistory() error {
 	// The primary is empty, so a stale backup must not be allowed to restore
 	// the old conversation. If writing the empty backup fails, try removing it.
 	if err := writeFileAtomic(path+".bak", data); err != nil {
-		fmt.Fprintf(os.Stderr, "history: clear backup: %v\n", err)
+		appLog("history: clear backup: %v", err)
 		if removeErr := os.Remove(path + ".bak"); removeErr != nil && !os.IsNotExist(removeErr) {
-			fmt.Fprintf(os.Stderr, "history: remove stale backup: %v\n", removeErr)
+			appLog("history: remove stale backup: %v", removeErr)
 		}
 		a.setHistoryError("Chat history was cleared, but the backup could not be updated: " + err.Error())
 		return nil
@@ -1582,11 +1667,11 @@ func writeHistoryFile(path string, data []byte) error {
 				if encrypted, encryptErr := encodeHistoryData(current); encryptErr == nil {
 					backupData = encrypted
 				} else {
-					fmt.Fprintf(os.Stderr, "history: encrypt backup: %v\n", encryptErr)
+					appLog("history: encrypt backup: %v", encryptErr)
 				}
 			}
 			if backupErr := writeFileAtomic(backupPath, backupData); backupErr != nil {
-				fmt.Fprintf(os.Stderr, "history: backup: %v\n", backupErr)
+				appLog("history: backup: %v", backupErr)
 			}
 		}
 	}
@@ -1599,7 +1684,7 @@ func writeHistoryFile(path string, data []byte) error {
 	// invalid backup must not survive the first successful save.
 	if _, _, backupErr := readHistoryFile(backupPath); backupErr != nil {
 		if writeErr := writeFileAtomic(backupPath, encoded); writeErr != nil {
-			fmt.Fprintf(os.Stderr, "history: initial backup: %v\n", writeErr)
+			appLog("history: initial backup: %v", writeErr)
 		}
 	}
 	return nil
@@ -1902,7 +1987,7 @@ func (a *App) SetAutoStart(enabled bool) bool {
 	if err := config.Save(configPath(), settings); err != nil {
 		// The registry is already changed. Keep the in-memory setting in sync
 		// with the registry and report the persistence failure.
-		fmt.Fprintf(os.Stderr, "save auto-start setting: %v\n", err)
+		appLog("save auto-start setting: %v", err)
 		a.playVoice(voice.KeyError)
 		return false
 	}
@@ -1922,7 +2007,7 @@ func (a *App) syncAutoStart() {
 	settings := a.GetSettings()
 	if settings.AutoStartConfigured && !settings.AutoStart {
 		if err := autostart.Disable(); err != nil {
-			fmt.Fprintf(os.Stderr, "disable autostart: %v\n", err)
+			appLog("disable autostart: %v", err)
 		}
 		return
 	}
@@ -1934,13 +2019,13 @@ func (a *App) syncAutoStart() {
 
 	if !autostart.IsHiddenEnabled() {
 		if err := autostart.Enable(); err != nil {
-			fmt.Fprintf(os.Stderr, "repair autostart hidden: %v\n", err)
+			appLog("repair autostart hidden: %v", err)
 			return
 		}
 	}
 	// A stale StartupApproved flag silently disables a correct Run entry.
 	if err := autostart.ClearStartupApproval(); err != nil {
-		fmt.Fprintf(os.Stderr, "clear startup approval: %v\n", err)
+		appLog("clear startup approval: %v", err)
 	}
 }
 
@@ -2088,22 +2173,22 @@ func commandName(text string) string {
 // voiceForCommand picks a phrase for a command result. The image command is
 // special-cased before the generic error check so a failed generation uses
 // the image-specific phrase.
-func voiceForCommand(text, result string) voice.Key {
+func voiceForCommand(text string, result commands.Result) voice.Key {
 	name := strings.TrimPrefix(strings.ToLower(commandName(text)), "/")
 	switch name {
 	case "imagine", "image", "draw", "generate":
-		if strings.HasPrefix(result, commands.ResultImageSavedPrefix) {
+		if result.Kind == commands.KindImageSaved {
 			return voice.KeyImageDone
 		}
 		return voice.KeyImageFail
 	}
 
-	lowerResult := strings.ToLower(strings.TrimSpace(result))
+	lowerResult := strings.ToLower(strings.TrimSpace(result.Text))
 	if strings.HasPrefix(lowerResult, "no notes") ||
 		strings.HasPrefix(lowerResult, "i couldn't find") {
 		return voice.KeyNoInfo
 	}
-	if looksLikeError(result) {
+	if looksLikeError(result.Text) {
 		return voice.KeyError
 	}
 

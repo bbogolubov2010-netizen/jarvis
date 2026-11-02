@@ -2,7 +2,6 @@ package main
 
 import (
 	"embed"
-	"fmt"
 	"os"
 	"time"
 
@@ -38,9 +37,6 @@ func main() {
 			// start this executable. It must not create a second instance.
 			writeAutostartCheckMarker()
 			return
-		case "--voice-command-b64":
-			// Removed: commands are delivered over authenticated IPC so they
-			// never appear in a process command line. Ignore the legacy flag.
 		}
 	}
 
@@ -94,7 +90,7 @@ func main() {
 
 	if err != nil {
 		message := "JARVIS could not start:\n\n" + err.Error()
-		fmt.Fprintln(os.Stderr, message)
+		appLog("%s", message)
 		_, _ = winapi.MessageBox(
 			0,
 			winapi.StringToUTF16Ptr(message),
@@ -109,11 +105,11 @@ func main() {
 // Settings "Test" button can confirm the Run entry works.
 func writeAutostartCheckMarker() {
 	if err := os.MkdirAll(configDirPath(), 0o700); err != nil {
-		fmt.Fprintf(os.Stderr, "autostart check: %v\n", err)
+		appLog("autostart check: %v", err)
 		return
 	}
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
 	if err := os.WriteFile(autostartCheckPath(), []byte(stamp), 0o600); err != nil {
-		fmt.Fprintf(os.Stderr, "autostart check: %v\n", err)
+		appLog("autostart check: %v", err)
 	}
 }

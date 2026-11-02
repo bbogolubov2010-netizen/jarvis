@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -108,7 +109,9 @@ func NewClient(baseURL, model string) *Client {
 	}
 }
 
-// ValidateBaseURL accepts only absolute http(s) URLs and strips trailing slashes.
+// ValidateBaseURL accepts only absolute http(s) URLs and strips trailing
+// slashes. Plain HTTP is allowed only for a loopback endpoint: a remote model
+// receives the full chat history, so it must use HTTPS.
 func ValidateBaseURL(raw string) (string, error) {
 	raw = strings.TrimSpace(strings.TrimRight(raw, "/"))
 	if raw == "" {
@@ -124,10 +127,27 @@ func ValidateBaseURL(raw string) (string, error) {
 	if parsed.Host == "" {
 		return "", fmt.Errorf("Ollama URL has no host")
 	}
+	if parsed.User != nil {
+		return "", fmt.Errorf("Ollama URL must not contain credentials")
+	}
 	if parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", fmt.Errorf("Ollama URL must not contain a query or fragment")
 	}
+	if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
+		return "", fmt.Errorf("remote Ollama URLs must use https")
+	}
 	return raw, nil
+}
+
+// isLoopbackHost reports whether host names the local machine. Only loopback
+// is exempt from the HTTPS requirement; private-network addresses are not.
+func isLoopbackHost(host string) bool {
+	host = strings.TrimSpace(strings.TrimSuffix(host, "."))
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // SetBaseURL validates and stores the endpoint.

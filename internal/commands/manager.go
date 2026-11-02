@@ -8,9 +8,8 @@ import (
 	"Jarvis/internal/audit"
 )
 
-// Sentinel results returned by handlers and interpreted by the App layer.
-// They never contain human-readable text, so routing cannot be confused with
-// a reply shown to the user.
+// Sentinel results returned by handlers. They are decoded into a typed Result
+// by Process, so the App layer never has to match user-visible text.
 const (
 	ResultClearChat         = "CMD_CLEAR_CHAT"
 	ResultScreenshotConfirm = "CMD_SCREENSHOT_CONFIRM"
@@ -22,6 +21,61 @@ const (
 	ResultListReminders     = "CMD_LIST_REMINDERS"
 	ResultGamePrefix        = "CMD_GAME:"
 )
+
+// Kind identifies a command outcome that requires app-level handling instead of
+// being shown as plain text.
+type Kind string
+
+const (
+	KindText              Kind = ""
+	KindClearChat         Kind = "clear_chat"
+	KindScreenshotConfirm Kind = "screenshot_confirm"
+	KindShutdownConfirm   Kind = "shutdown_confirm"
+	KindRestartConfirm    Kind = "restart_confirm"
+	KindImageSaved        Kind = "image_saved"
+	KindRemind            Kind = "remind"
+	KindTimer             Kind = "timer"
+	KindListReminders     Kind = "list_reminders"
+	KindGame              Kind = "game"
+)
+
+// Result is the decoded outcome of a command. Text holds the reply for
+// KindText and the argument payload for the other kinds.
+type Result struct {
+	Kind Kind
+	Text string
+}
+
+// decodeResult converts the handler's wire-format string into a Result. The
+// encoding is private to this package; callers only see typed values.
+func decodeResult(raw string) Result {
+	switch raw {
+	case ResultClearChat:
+		return Result{Kind: KindClearChat}
+	case ResultScreenshotConfirm:
+		return Result{Kind: KindScreenshotConfirm}
+	case ResultShutdownConfirm:
+		return Result{Kind: KindShutdownConfirm}
+	case ResultRestartConfirm:
+		return Result{Kind: KindRestartConfirm}
+	case ResultListReminders:
+		return Result{Kind: KindListReminders}
+	}
+	for _, candidate := range []struct {
+		prefix string
+		kind   Kind
+	}{
+		{ResultImageSavedPrefix, KindImageSaved},
+		{ResultRemindPrefix, KindRemind},
+		{ResultTimerPrefix, KindTimer},
+		{ResultGamePrefix, KindGame},
+	} {
+		if strings.HasPrefix(raw, candidate.prefix) {
+			return Result{Kind: candidate.kind, Text: strings.TrimPrefix(raw, candidate.prefix)}
+		}
+	}
+	return Result{Kind: KindText, Text: raw}
+}
 
 // Command is a single registered command.
 type Command struct {
@@ -132,24 +186,25 @@ func (m *Manager) Help() string {
 	return out.String()
 }
 
-// Process executes the first command matching text.
-func (m *Manager) Process(text string) (string, bool) {
+// Process executes the first command matching text and returns its typed
+// outcome.
+func (m *Manager) Process(text string) (Result, bool) {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
-		return "", false
+		return Result{}, false
 	}
 	lower := strings.ToLower(trimmed)
 	for _, cmd := range m.commands {
 		if result, ok := matchCmd(lower, trimmed, cmd.Name, cmd.Handler); ok {
-			return result, true
+			return decodeResult(result), true
 		}
 		for _, alias := range cmd.Aliases {
 			if result, ok := matchCmd(lower, trimmed, alias, cmd.Handler); ok {
-				return result, true
+				return decodeResult(result), true
 			}
 		}
 	}
-	return "", false
+	return Result{}, false
 }
 
 func matchCmd(lower, original, name string, handler func(string) string) (string, bool) {

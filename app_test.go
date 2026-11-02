@@ -39,27 +39,27 @@ func TestVoiceForCommand(t *testing.T) {
 	tests := []struct {
 		name   string
 		input  string
-		result string
+		result commands.Result
 		want   voice.Key
 	}{
-		{name: "system", input: "/system", result: "CPU: ok", want: voice.KeyCheckDone},
-		{name: "list", input: "/ls", result: "file.txt", want: voice.KeyCheckDone},
-		{name: "no notes", input: "/notes", result: "No notes saved.", want: voice.KeyNoInfo},
-		{name: "save note", input: "/note buy milk", result: "Note saved.", want: voice.KeyCreated},
-		{name: "volume", input: "/volume 50", result: "Volume set to 50.", want: voice.KeyAsYouWish},
-		{name: "volume failed", input: "/volume mute", result: "Mute failed: no device", want: voice.KeyError},
-		{name: "access denied", input: "/mkdir x", result: "Access denied: outside allowed folders", want: voice.KeyError},
-		{name: "help", input: "/help", result: "Available commands:", want: voice.KeyAtYourService},
-		{name: "error", input: "/unknown", result: "Error: nope", want: voice.KeyError},
-		{name: "image failed", input: "/imagine cat", result: "Image generation failed: timeout", want: voice.KeyImageFail},
-		{name: "image saved", input: "/imagine cat", result: commands.ResultImageSavedPrefix + "cat.png:512x512", want: voice.KeyImageDone},
-		{name: "fallback", input: "/unknown", result: "Done.", want: voice.KeyAck},
+		{name: "system", input: "/system", result: commands.Result{Text: "CPU: ok"}, want: voice.KeyCheckDone},
+		{name: "list", input: "/ls", result: commands.Result{Text: "file.txt"}, want: voice.KeyCheckDone},
+		{name: "no notes", input: "/notes", result: commands.Result{Text: "No notes saved."}, want: voice.KeyNoInfo},
+		{name: "save note", input: "/note buy milk", result: commands.Result{Text: "Note saved."}, want: voice.KeyCreated},
+		{name: "volume", input: "/volume 50", result: commands.Result{Text: "Volume set to 50."}, want: voice.KeyAsYouWish},
+		{name: "volume failed", input: "/volume mute", result: commands.Result{Text: "Mute failed: no device"}, want: voice.KeyError},
+		{name: "access denied", input: "/mkdir x", result: commands.Result{Text: "Access denied: outside allowed folders"}, want: voice.KeyError},
+		{name: "help", input: "/help", result: commands.Result{Text: "Available commands:"}, want: voice.KeyAtYourService},
+		{name: "error", input: "/unknown", result: commands.Result{Text: "Error: nope"}, want: voice.KeyError},
+		{name: "image failed", input: "/imagine cat", result: commands.Result{Text: "Image generation failed: timeout"}, want: voice.KeyImageFail},
+		{name: "image saved", input: "/imagine cat", result: commands.Result{Kind: commands.KindImageSaved, Text: "cat.png:512x512"}, want: voice.KeyImageDone},
+		{name: "fallback", input: "/unknown", result: commands.Result{Text: "Done."}, want: voice.KeyAck},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			if got := voiceForCommand(test.input, test.result); got != test.want {
-				t.Fatalf("voiceForCommand(%q, %q) = %q, want %q", test.input, test.result, got, test.want)
+				t.Fatalf("voiceForCommand(%q, %+v) = %q, want %q", test.input, test.result, got, test.want)
 			}
 		})
 	}

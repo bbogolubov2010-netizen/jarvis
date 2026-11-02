@@ -143,3 +143,40 @@ func TestManifestWithoutStartupFilesIsRejected(t *testing.T) {
 		t.Fatal("manifest without startup files was accepted")
 	}
 }
+
+func TestReleaseBuildRequiresManifestWhenEngineIsInstalled(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "libvosk.dll"), "core")
+
+	previous := releaseBuild
+	releaseBuild = "1"
+	t.Cleanup(func() { releaseBuild = previous })
+
+	if err := Locate(root).Verify(); err == nil {
+		t.Fatal("release build accepted an engine without a checksum manifest")
+	}
+}
+
+func TestReleaseBuildAllowsEmptyEngineRoot(t *testing.T) {
+	root := t.TempDir()
+
+	previous := releaseBuild
+	releaseBuild = "1"
+	t.Cleanup(func() { releaseBuild = previous })
+
+	// Voice setup downloads the engine after startup, so an empty root must not
+	// be treated as a tampered installation.
+	if err := Locate(root).Verify(); err != nil {
+		t.Fatalf("empty engine root was rejected: %v", err)
+	}
+}
+
+func TestRequireChecksumsEnvIsHonoured(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "libvosk.dll"), "core")
+	t.Setenv("JARVIS_VOICE_REQUIRE_CHECKSUMS", "1")
+
+	if err := Locate(root).Verify(); err == nil {
+		t.Fatal("JARVIS_VOICE_REQUIRE_CHECKSUMS did not require a manifest")
+	}
+}

@@ -14,6 +14,10 @@ import (
 
 const checksumManifestName = "checksums.json"
 
+// releaseBuild is set to "1" by the release workflow with -X.
+// When non-empty, checksums are mandatory if any engine files exist.
+var releaseBuild string
+
 type checksumManifest struct {
 	Algorithm string                    `json:"algorithm"`
 	Files     map[string]string         `json:"files"`
@@ -28,10 +32,12 @@ type checksumDigest struct {
 	Size   int64  `json:"size,omitempty"`
 }
 
-// Verify checks the optional checksums.json manifest in the engine root. A
-// missing manifest is accepted for backward compatibility, but an invalid or
-// tampered manifest is a hard error. Set JARVIS_VOICE_REQUIRE_CHECKSUMS=1 to
-// make the manifest mandatory in production.
+// Verify checks the checksums.json manifest in the engine root. A missing
+// manifest is accepted in development builds, but an invalid or tampered
+// manifest is always a hard error. Release builds set releaseBuild via -X, and
+// JARVIS_VOICE_REQUIRE_CHECKSUMS=1 does the same for manual runs; in those
+// modes a manifest is mandatory as soon as engine files exist, so a partially
+// installed engine cannot fall back to unverified binaries.
 //
 // Only the "files" section is verified. Large models and optional runtimes live
 // in "on_demand" and are checked by VerifyOnDemand.
@@ -98,7 +104,7 @@ func (p Paths) loadManifest() (*checksumManifest, error) {
 	manifestPath := filepath.Join(p.Root, checksumManifestName)
 	data, err := os.ReadFile(manifestPath)
 	if errors.Is(err, os.ErrNotExist) {
-		if os.Getenv("JARVIS_VOICE_REQUIRE_CHECKSUMS") == "1" {
+		if checksumsRequired() && p.hasEngineFiles() {
 			return nil, fmt.Errorf("voice engine checksum manifest is missing: %s", manifestPath)
 		}
 		return nil, nil
@@ -118,6 +124,33 @@ func (p Paths) loadManifest() (*checksumManifest, error) {
 		return nil, errors.New("voice engine checksum manifest is empty")
 	}
 	return &manifest, nil
+}
+
+// checksumsRequired reports whether a missing manifest is fatal. Release
+// builds set releaseBuild with -X Jarvis/internal/voiceengine.releaseBuild=1.
+func checksumsRequired() bool {
+	return releaseBuild != "" || os.Getenv("JARVIS_VOICE_REQUIRE_CHECKSUMS") == "1"
+}
+
+// hasEngineFiles reports whether anything was installed into this engine root.
+// A fresh install has no engine yet, so requiring a manifest there would block
+// voice setup until the first download finishes.
+func (p Paths) hasEngineFiles() bool {
+	for _, path := range []string{
+		p.VoskDLL,
+		p.VoskModel,
+		p.VoskModelEn,
+		p.WhisperCLI,
+		p.WhisperModel,
+	} {
+		if path == "" {
+			continue
+		}
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (p Paths) resolveManifestPath(relative string) (string, error) {

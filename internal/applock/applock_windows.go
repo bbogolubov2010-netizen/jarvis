@@ -21,48 +21,32 @@ const (
 // instance already owns it; the returned release function still closes this
 // handle.
 func Create() (func(), bool, error) {
-	name, err := windows.UTF16PtrFromString(mutexName)
-	if err != nil {
-		return nil, false, fmt.Errorf("encode mutex name: %w", err)
-	}
-	handle, createErr := windows.CreateMutex(nil, false, name)
-	if createErr != nil && !errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
-		return nil, false, fmt.Errorf("create app mutex: %w", createErr)
-	}
-	release := func() {
-		_ = windows.CloseHandle(handle)
-	}
-	return release, errors.Is(createErr, windows.ERROR_ALREADY_EXISTS), nil
+	return createNamed(mutexName)
 }
 
 // CreateAgent takes the single-instance mutex for the background voice agent.
 // The bool is true when another agent already owns it; the returned release
 // function still closes this handle.
 func CreateAgent() (func(), bool, error) {
-	name, err := windows.UTF16PtrFromString(agentMutexName)
-	if err != nil {
-		return nil, false, fmt.Errorf("encode agent mutex name: %w", err)
-	}
-	handle, createErr := windows.CreateMutex(nil, false, name)
-	if createErr != nil && !errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
-		return nil, false, fmt.Errorf("create agent mutex: %w", createErr)
-	}
-	release := func() {
-		_ = windows.CloseHandle(handle)
-	}
-	return release, errors.Is(createErr, windows.ERROR_ALREADY_EXISTS), nil
+	return createNamed(agentMutexName)
 }
 
 // CreateAgentSupervisor takes the single-instance mutex for the supervisor
 // that restarts the background agent after a crash.
 func CreateAgentSupervisor() (func(), bool, error) {
-	name, err := windows.UTF16PtrFromString(supervisorMutexName)
+	return createNamed(supervisorMutexName)
+}
+
+// createNamed is the shared implementation. Tests pass a unique name so they do
+// not depend on whether a real JARVIS instance happens to be running.
+func createNamed(name string) (func(), bool, error) {
+	pointer, err := windows.UTF16PtrFromString(name)
 	if err != nil {
-		return nil, false, fmt.Errorf("encode agent supervisor mutex name: %w", err)
+		return nil, false, fmt.Errorf("encode mutex name: %w", err)
 	}
-	handle, createErr := windows.CreateMutex(nil, false, name)
+	handle, createErr := windows.CreateMutex(nil, false, pointer)
 	if createErr != nil && !errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
-		return nil, false, fmt.Errorf("create agent supervisor mutex: %w", createErr)
+		return nil, false, fmt.Errorf("create mutex %q: %w", name, createErr)
 	}
 	release := func() {
 		_ = windows.CloseHandle(handle)

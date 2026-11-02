@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -56,6 +57,35 @@ func TestPruneImageDirCapsFileCount(t *testing.T) {
 
 func TestPruneImageDirIgnoresMissingDirectory(t *testing.T) {
 	pruneImageDir(filepath.Join(t.TempDir(), "missing"))
+}
+
+func TestScreenConsentIsOneShotAndExpires(t *testing.T) {
+	app := &App{}
+	if app.consumeScreenConsent() {
+		t.Fatal("consent was accepted without being granted")
+	}
+	if !app.grantScreenConsent(time.Minute) {
+		t.Fatal("grantScreenConsent returned false")
+	}
+	if !app.consumeScreenConsent() {
+		t.Fatal("granted consent was not accepted")
+	}
+	if app.consumeScreenConsent() {
+		t.Fatal("consent was accepted twice")
+	}
+
+	app.screenConsentUntil = time.Now().Add(-time.Second)
+	if app.consumeScreenConsent() {
+		t.Fatal("expired consent was accepted")
+	}
+}
+
+func TestProcessWithScreenRequiresConsent(t *testing.T) {
+	app := &App{}
+	got := app.ProcessWithScreen("what is on screen")
+	if !strings.Contains(got, "confirmation") {
+		t.Fatalf("ProcessWithScreen without consent = %q", got)
+	}
 }
 
 func TestWaitForStreamsTimesOut(t *testing.T) {

@@ -9,6 +9,7 @@ Windows-only Wails 2 desktop assistant: Go backend, Vue 3 frontend, local Ollama
 ```powershell
 cd frontend
 npm ci
+npm test
 npm run build
 cd ..
 wails build -ldflags "-linkmode=internal"   # -> build/bin/Jarvis.exe
@@ -17,7 +18,7 @@ wails build -ldflags "-linkmode=internal"   # -> build/bin/Jarvis.exe
 - `npm run build` runs `vue-tsc --noEmit` first; TypeScript errors fail the build.
 - `wails dev` runs Vite + Go with hot reload.
 - A running `build/bin/Jarvis.exe` locks the output file and the single-instance lock; stop it before rebuilding.
-- Always pass `-ldflags "-linkmode=internal"`. Without it the MinGW external linker prints `.rsrc merge failure: multiple non-default manifests`; the build still succeeds, but the warning hides real failures and CI logs get noisy. With the internal linker the warning disappears and the executable starts normally. Release builds should extend the same flag: `-ldflags "-linkmode=internal -X main.version=1.2.3"`.
+- Always pass `-ldflags "-linkmode=internal"`. Without it the MinGW external linker prints `.rsrc merge failure: multiple non-default manifests`; the build still succeeds, but the warning hides real failures and CI logs get noisy. With the internal linker the warning disappears and the executable starts normally. Release builds extend the same flag: `-ldflags "-linkmode=internal -X main.version=1.2.3 -X Jarvis/internal/voiceengine.releaseBuild=1"`.
 - Go 1.26.x only. Go 1.27 currently breaks the Wails build. Wails v2.13 matches `go.mod`; do not bump either without a full build.
 - On this workstation `go`, `node`, and `wails` may be missing from `PATH`. Working copies live under `%TEMP%\opencode\*toolchain*\`; GitHub Desktop supplies `git.exe` under `%LOCALAPPDATA%\GitHubDesktop\app-*\resources\app\git\cmd`.
 
@@ -28,9 +29,10 @@ gofmt -l .               # must be empty
 go vet ./...
 go test ./...
 go test -race ./...
+cd frontend; npm test
 ```
 
-CI (`.github/workflows/ci.yml`) runs frontend build, then `gofmt`, `vet`, `test`, `test -race`, `build` — in that order, on Windows.
+CI (`.github/workflows/ci.yml`) runs `go mod verify`, frontend tests, frontend build, `gofmt`, `vet`, `test`, `test -race`, `go build ./...`, then installs the Wails CLI and runs `wails build -s -skipbindings -ldflags "-linkmode=internal"` — in that order, on Windows. Keep the Wails step: a plain `go build` can pass while the packaged application fails.
 
 Focused run: `go test ./internal/netguard -run TestIsPublicIPRejectsSpecialRanges -v`
 
@@ -43,13 +45,19 @@ Manual/hardware/network tests use the `manual` build tag and are excluded from C
 - `./jarvis/` is a stale, gitignored copy of the project with its own `go.mod`. Never edit it. `gofmt -l .`, grep, and file searches will show duplicate sources from it; scope checks to the real tree. CI does not see this directory.
 - `frontend/wailsjs/` is generated and gitignored. `Window.go.main.App` is hand-declared in `frontend/src/App.vue`; whenever you add an exported `*App` method, add its TypeScript signature there too or the UI cannot call it. `bindings_test.go` reflects over `*App` and fails when a signature is missing, but it cannot check argument types.
 - `voice/*.wav` is copyrighted and must never be committed. Tests must pass without the local sound pack.
-- `build/bin/voice-engine` (~3.4 GB) is not in git. Engine layout and resolution order live in `internal/voiceengine`. `checksums.json` has two sections: `files` (17 startup binaries, hashed by `Verify()`) and `on_demand` (models and large runtimes ≥ 64 MB, hashed only by `VerifyOnDemand()`). Regenerate with `go run ./tools/checksumgen -root build\bin\voice-engine` after replacing engine files.
+- `build/bin/voice-engine` (~3.4 GB) is not in git. Engine layout and resolution order live in `internal/voiceengine`. `checksums.json` has two sections: `files` (17 startup binaries, hashed by `Verify()`) and `on_demand` (models and large runtimes ≥ 64 MB, hashed only by `VerifyOnDemand()`). Regenerate with `go run ./tools/checksumgen -root build\bin\voice-engine` after replacing engine files. `releaseBuild` is stamped by the release workflow; a release build requires the manifest whenever engine files exist, while an empty engine root stays allowed for first-run setup.
 - `LaunchApp` is deliberately restricted to the curated `DetectApps()` catalog used by the sidebar. Do not add a raw path/name launch path back; the path is re-validated as absolute, existing, and a file, and denied launches are audit-logged.
 - Version lives in `version.go` (`var version = "0.1.0"`, overridable with `-X main.version=...`) and is exposed through `App.GetVersion()` and `StatusInfo.Version`. Keep the default in sync with the `info` block in `wails.json`.
 - Piper binaries in the engine folder are unused — the app has no TTS integration.
 - `*.exe`, `*.dll`, `*.bin`, `build/bin/`, `frontend/dist/` are gitignored. Never commit build artifacts.
-- `app.go` (~1900 lines) and `frontend/src/App.vue` (~1974 lines) are monoliths with no component split. Expect large diffs.
-- User data in `%AppData%\Jarvis` is DPAPI-encrypted and not portable between users or machines; a copied `settings.json` will fail to decrypt elsewhere.
+- `app.go` (~2200 lines) and `frontend/src/App.vue` (~2100 lines) are monoliths with no component split. Expect large diffs.
+- Root-package tests must not touch the real `%AppData%\Jarvis`. `main_test.go` sets `APPDATA` to a temporary directory in `TestMain`; keep using it instead of calling `os.UserConfigDir` directly in tests.
+- `appLog` (`logging.go`) writes startup/runtime errors to stderr and `%AppData%\Jarvis\logs\app.log` with bounded rotation. Use it instead of `fmt.Fprintf(os.Stderr, ...)`; a packaged GUI has no console.
+- `internal/applock` tests use `createNamed` with a per-run mutex name. Never make tests depend on the production `Local\JarvisAppRunning` name; a developer may have JARVIS open.
+- `commands.Process` returns a typed `commands.Result` (`Kind` + `Text`). Route on `Kind`; do not reintroduce string-prefix matching in `app.go`.
+- User data in `%AppData%\Jarvis` is DPAPI-encrypted and not portable between users or machines; a copied `settings.json` will fail to decrypt elsewhere. Legacy plaintext settings are re-encrypted during `NewApp`; history and notes are re-encrypted on their next save.
+- Ollama URL policy: `http` is allowed only for loopback (`localhost`, `127.0.0.1`, `::1`); remote hosts must use `https`. Credentials, queries, and fragments are rejected. Keep tests in `internal/ollama/client_test.go` in sync.
+- Screen capture is double-gated: the UI calls `ApproveScreenCapture` (one-time token, 2-minute TTL) immediately before `ProcessWithScreen`, which consumes the token on the backend. Never remove the backend check or make the token reusable.
 
 ## Architecture
 
@@ -72,5 +80,6 @@ Manual/hardware/network tests use the `manual` build tag and are excluded from C
 
 - Repo: `bbogolubov2010-netizen/jarvis`, branch `main`, public.
 - Version `0.1.0`. Releases should stamp `-X main.version=<tag>`; the UI shows `StatusInfo.Version`.
+- `.github/workflows/release.yml` runs on `v*` tags: it verifies the tag matches `wails.json`, tests, builds with `-X main.version` and `-X Jarvis/internal/voiceengine.releaseBuild=1`, optionally signs with the `WINDOWS_SIGNING_CERT_BASE64`/`WINDOWS_SIGNING_CERT_PASSWORD` secrets, writes `SHA256SUMS.txt`, and publishes a GitHub release.
 - No signed installer and no updater yet. `build/windows/installer/project.nsi` is unsigned NSIS scaffolding, intended for a per-user install under `%LOCALAPPDATA%\Programs\JARVIS`; `wails.json` now carries the `info` block (company/product/version/copyright).
 - Tests and CI must never require the local voice pack or the 3.4 GB engine.

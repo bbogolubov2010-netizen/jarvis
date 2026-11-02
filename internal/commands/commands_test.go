@@ -45,24 +45,48 @@ func TestNoDuplicateCommandTriggers(t *testing.T) {
 	}
 }
 
-func TestDangerousCommandsReturnSentinels(t *testing.T) {
+func TestDangerousCommandsReturnTypedKinds(t *testing.T) {
 	manager := NewManager()
 
-	cases := map[string]string{
-		"/screenshot": ResultScreenshotConfirm,
-		"/screen":     ResultScreenshotConfirm,
-		"/shot":       ResultScreenshotConfirm,
-		"/shutdown":   ResultShutdownConfirm,
-		"/restart":    ResultRestartConfirm,
-		"/clear":      ResultClearChat,
+	cases := map[string]Kind{
+		"/screenshot": KindScreenshotConfirm,
+		"/screen":     KindScreenshotConfirm,
+		"/shot":       KindScreenshotConfirm,
+		"/shutdown":   KindShutdownConfirm,
+		"/restart":    KindRestartConfirm,
+		"/clear":      KindClearChat,
 	}
 	for input, want := range cases {
 		got, handled := manager.Process(input)
 		if !handled {
 			t.Fatalf("%s was not handled", input)
 		}
-		if got != want {
-			t.Fatalf("%s returned %q, want %q", input, got, want)
+		if got.Kind != want {
+			t.Fatalf("%s returned kind %q, want %q", input, got.Kind, want)
+		}
+	}
+}
+
+func TestProcessDecodesArgumentKinds(t *testing.T) {
+	manager := NewManager()
+
+	cases := []struct {
+		input string
+		kind  Kind
+		text  string
+	}{
+		{input: "/remind 10 tea", kind: KindRemind, text: "10 tea"},
+		{input: "/timer 5", kind: KindTimer, text: "5"},
+		{input: "/game status", kind: KindGame, text: "status"},
+		{input: "/reminders", kind: KindListReminders},
+	}
+	for _, test := range cases {
+		got, handled := manager.Process(test.input)
+		if !handled {
+			t.Fatalf("%s was not handled", test.input)
+		}
+		if got.Kind != test.kind || got.Text != test.text {
+			t.Fatalf("%s = %+v, want kind=%q text=%q", test.input, got, test.kind, test.text)
 		}
 	}
 }
@@ -73,11 +97,11 @@ func TestCommandAliasesRouteToDistinctHandlers(t *testing.T) {
 	if _, handled := manager.Process("/notes"); !handled {
 		t.Fatal("/notes is not routed")
 	}
-	if got, handled := manager.Process("/list"); !handled || !strings.Contains(got, "Contents of") {
-		t.Fatalf("/list should list files, got %q handled=%v", got, handled)
+	if got, handled := manager.Process("/list"); !handled || !strings.Contains(got.Text, "Contents of") {
+		t.Fatalf("/list should list files, got %+v handled=%v", got, handled)
 	}
-	if got, handled := manager.Process("/help"); !handled || !strings.Contains(got, "restart") {
-		t.Fatalf("/help returned %q", got)
+	if got, handled := manager.Process("/help"); !handled || !strings.Contains(got.Text, "restart") {
+		t.Fatalf("/help returned %+v", got)
 	}
 }
 

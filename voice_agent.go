@@ -315,10 +315,6 @@ func agentVoiceSourceDirs() []string {
 	return dirs[1:]
 }
 
-const agentLogMaxBytes = 1 << 20
-
-var agentLogMu sync.Mutex
-
 // agentLogVoice records only metadata by default. Raw speech is sensitive and
 // is not written to the plaintext agent log unless the user explicitly opts
 // in for debugging with JARVIS_VOICE_DEBUG=1.
@@ -330,28 +326,13 @@ func agentLogVoice(kind, text string) {
 	agentLog("%s: %d chars", kind, utf8.RuneCountInString(text))
 }
 
+// agentLog keeps the background listener's diagnostics in a rotating file.
+// The agent may run without any visible window, so stderr is not enough.
 func agentLog(format string, args ...any) {
-	agentLogMu.Lock()
-	defer agentLogMu.Unlock()
-
-	line := fmt.Sprintf("%s %s\n", time.Now().Format("2006-01-02 15:04:05"), fmt.Sprintf(format, args...))
-	_ = os.MkdirAll(configDirPath(), 0o700)
-	logPath := filepath.Join(configDirPath(), "voice-agent.log")
-	rotateAgentLog(logPath)
-	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return
-	}
-	defer file.Close()
-	_, _ = file.WriteString(line)
-}
-
-func rotateAgentLog(path string) {
-	info, err := os.Stat(path)
-	if err != nil || info.Size() < agentLogMaxBytes {
-		return
-	}
-	backup := path + ".1"
-	_ = os.Remove(backup)
-	_ = os.Rename(path, backup)
+	writeLogFile(
+		filepath.Join(configDirPath(), "voice-agent.log"),
+		fmt.Sprintf(format, args...),
+		agentLogMaxBytes,
+		1,
+	)
 }

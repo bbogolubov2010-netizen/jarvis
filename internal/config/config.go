@@ -184,12 +184,19 @@ func Normalize(s Settings) Settings {
 // Load reads settings. found reports whether the file existed. A corrupt file
 // yields defaults plus an error so the caller can tell the user.
 func Load(path string) (settings Settings, found bool, err error) {
+	settings, found, _, err = LoadDetailed(path)
+	return settings, found, err
+}
+
+// LoadDetailed is Load plus a plaintext flag. It is used during startup to
+// migrate legacy plaintext settings to DPAPI as soon as they are read.
+func LoadDetailed(path string) (settings Settings, found bool, plaintext bool, err error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return DefaultSettings(), false, nil
+		return DefaultSettings(), false, false, nil
 	}
 	if err != nil {
-		return DefaultSettings(), false, fmt.Errorf("read settings: %w", err)
+		return DefaultSettings(), false, false, fmt.Errorf("read settings: %w", err)
 	}
 	found = true
 
@@ -202,18 +209,18 @@ func Load(path string) (settings Settings, found bool, err error) {
 	var loaded Settings
 	if len(trimmed) > 0 && trimmed[0] == '{' {
 		if err := json.Unmarshal(trimmed, &loaded); err == nil {
-			return Normalize(loaded), true, nil
+			return Normalize(loaded), true, true, nil
 		}
 	}
 
 	decrypted, decryptErr := dpapi.Decrypt(data)
 	if decryptErr != nil {
-		return DefaultSettings(), true, fmt.Errorf("decrypt settings: %w", decryptErr)
+		return DefaultSettings(), true, false, fmt.Errorf("decrypt settings: %w", decryptErr)
 	}
 	if err := json.Unmarshal(decrypted, &loaded); err != nil {
-		return DefaultSettings(), true, fmt.Errorf("parse settings: %w", err)
+		return DefaultSettings(), true, false, fmt.Errorf("parse settings: %w", err)
 	}
-	return Normalize(loaded), true, nil
+	return Normalize(loaded), true, false, nil
 }
 
 // BackupCorrupt copies a file that failed to load to a timestamped sibling so

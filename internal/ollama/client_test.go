@@ -6,12 +6,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 )
 
 func TestValidateBaseURL(t *testing.T) {
 	valid := map[string]string{
 		"http://localhost:11434/":      "http://localhost:11434",
+		"http://127.0.0.1:11434":       "http://127.0.0.1:11434",
+		"http://[::1]:11434":           "http://[::1]:11434",
+		"https://localhost:11434":      "https://localhost:11434",
 		" https://ollama.example.com ": "https://ollama.example.com",
 	}
 	for input, want := range valid {
@@ -27,10 +31,22 @@ func TestValidateBaseURL(t *testing.T) {
 	for _, input := range []string{
 		"", "localhost:11434", "ftp://example.com", "http://",
 		"http://localhost:11434/?token=secret", "http://localhost:11434/#fragment",
+		"http://ollama.example.com:11434", "http://192.168.1.10:11434",
+		"https://user:pass@ollama.example.com",
 	} {
 		if _, err := ValidateBaseURL(input); err == nil {
 			t.Fatalf("ValidateBaseURL(%q) should fail", input)
 		}
+	}
+}
+
+func TestValidateBaseURLRequiresHTTPSForRemoteHosts(t *testing.T) {
+	_, err := ValidateBaseURL("http://ollama.example.com")
+	if err == nil {
+		t.Fatal("remote plain HTTP endpoint was accepted")
+	}
+	if !strings.Contains(err.Error(), "https") {
+		t.Fatalf("error %q does not explain the HTTPS requirement", err)
 	}
 }
 

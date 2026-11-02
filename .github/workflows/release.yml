@@ -1,0 +1,129 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    # Optional Authenticode signing. Add both repository secrets to sign the
+    # executable; without them the unsigned binary is still published.
+    env:
+      SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+      SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Test frontend
+        working-directory: frontend
+        run: npm test
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify module checksums
+        run: go mod verify
+
+      - name: Test
+        run: go test ./...
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+
+      # A tag is the release source of truth. Refuse to publish when it does not
+      # match wails.json, otherwise the executable, the installer metadata, and
+      # the release title disagree.
+      - name: Resolve version
+        id: meta
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') {
+            throw "Release tags must look like v1.2.3, got '$tag'."
+          }
+          $version = $Matches[1]
+          $meta = Get-Content wails.json -Raw | ConvertFrom-Json
+          if ($meta.info.productVersion -ne $version) {
+            throw "Tag '$tag' does not match wails.json productVersion '$($meta.info.productVersion)'."
+          }
+          "VERSION=$version" >> $env:GITHUB_ENV
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build application
+        shell: pwsh
+        run: |
+          wails build -s -skipbindings -ldflags "-linkmode=internal -X main.version=$env:VERSION -X Jarvis/internal/voiceengine.releaseBuild=1"
+          if (-not (Test-Path build\bin\Jarvis.exe)) {
+            throw "wails build did not produce build\bin\Jarvis.exe"
+          }
+
+      # Signing is opt-in: a repository owner adds the PFX (base64) and its
+      # password as secrets. signtool ships with the Windows SDK on the runner.
+      - name: Sign executable
+        if: env.SIGNING_CERT_BASE64 != ''
+        shell: pwsh
+        run: |
+          $certPath = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:SIGNING_CERT_BASE64))
+          try {
+            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction Stop |
+              Where-Object { $_.FullName -match '\\x64\\' } |
+              Select-Object -First 1
+            if (-not $signtool) {
+              throw "signtool.exe was not found in the Windows SDK"
+            }
+            & $signtool.FullName sign /f $certPath /p $env:SIGNING_CERT_PASSWORD /fd SHA256 `
+              /tr http://timestamp.digicert.com /td SHA256 build\bin\Jarvis.exe
+            if ($LASTEXITCODE -ne 0) {
+              throw "signtool failed with exit code $LASTEXITCODE"
+            }
+          } finally {
+            Remove-Item $certPath -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $assetName = "Jarvis-$env:VERSION-windows-amd64.exe"
+          Copy-Item build\bin\Jarvis.exe "dist\$assetName"
+          $hash = (Get-FileHash "dist\$assetName" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $assetName" | Set-Content dist\SHA256SUMS.txt -Encoding ascii
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $asset = "dist\Jarvis-$env:VERSION-windows-amd64.exe"
+          gh release create $env:GITHUB_REF_NAME `
+            --title "JARVIS $env:VERSION" `
+            --generate-notes `
+            --verify-tag `
+            $asset `
+            dist\SHA256SUMS.txt

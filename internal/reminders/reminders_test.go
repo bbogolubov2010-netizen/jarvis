@@ -69,6 +69,10 @@ func TestStorePersistsAndRemoves(t *testing.T) {
 
 func TestStoreRecoversFromCorruptFile(t *testing.T) {
 	dir := t.TempDir()
+	// Windows can briefly keep the renamed corrupt file open (antivirus,
+	// indexer), which makes testing.TempDir cleanup fail intermittently.
+	// Remove the directory ourselves with retries; TempDir then sees it gone.
+	t.Cleanup(func() { removeAllWithRetry(t, dir) })
 	path := filepath.Join(dir, "reminders.json")
 	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
 		t.Fatalf("write corrupt file: %v", err)
@@ -83,5 +87,20 @@ func TestStoreRecoversFromCorruptFile(t *testing.T) {
 	matches, globErr := filepath.Glob(path + ".corrupt-*")
 	if globErr != nil || len(matches) != 1 {
 		t.Fatalf("expected one backup file, got %v (err %v)", matches, globErr)
+	}
+}
+
+func removeAllWithRetry(t *testing.T, dir string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := os.RemoveAll(dir)
+		if err == nil || os.IsNotExist(err) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("remove temp dir %s: %v", dir, err)
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 }

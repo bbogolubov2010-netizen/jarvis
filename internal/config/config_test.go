@@ -7,10 +7,35 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
+// testTempDir removes its directory with retries. Windows can briefly keep a
+// freshly written settings file open (antivirus, indexer), which makes
+// testing.TempDir cleanup fail intermittently under the race detector.
+func testTempDir(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	t.Cleanup(func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			err := os.RemoveAll(dir)
+			if err == nil || os.IsNotExist(err) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("remove temp dir %s: %v", dir, err)
+				return
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	})
+	return dir
+}
+
 func TestSaveLoadRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "settings.json")
+	path := filepath.Join(testTempDir(t), "settings.json")
 	original := DefaultSettings()
 	original.Model = "test-model:1b"
 	original.WebSearch = false
@@ -41,7 +66,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 }
 
 func TestLoadMissingFileUsesDefaults(t *testing.T) {
-	settings, found, err := Load(filepath.Join(t.TempDir(), "missing.json"))
+	settings, found, err := Load(filepath.Join(testTempDir(t), "missing.json"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -137,8 +162,31 @@ func TestNormalizeVoiceLanguage(t *testing.T) {
 	}
 }
 
+func TestLoadDetailedReportsPlaintextAndEncryptedFiles(t *testing.T) {
+	dir := testTempDir(t)
+	path := filepath.Join(dir, "settings.json")
+
+	encoded, err := json.Marshal(DefaultSettings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, plaintext, err := LoadDetailed(path); err != nil || !found || !plaintext {
+		t.Fatalf("plaintext LoadDetailed = found:%v plaintext:%v err:%v", found, plaintext, err)
+	}
+
+	if err := Save(path, DefaultSettings()); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, plaintext, err := LoadDetailed(path); err != nil || !found || plaintext {
+		t.Fatalf("encrypted LoadDetailed = found:%v plaintext:%v err:%v", found, plaintext, err)
+	}
+}
+
 func TestLoadPlaintextJSONWithLeadingWhitespace(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "settings.json")
+	path := filepath.Join(testTempDir(t), "settings.json")
 	expected := DefaultSettings()
 	encoded, err := json.Marshal(expected)
 	if err != nil {
@@ -161,7 +209,7 @@ func TestLoadPlaintextJSONWithLeadingWhitespace(t *testing.T) {
 }
 
 func TestLoadPlaintextJSONWithBOM(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "settings.json")
+	path := filepath.Join(testTempDir(t), "settings.json")
 	expected := DefaultSettings()
 	encoded, err := json.Marshal(expected)
 	if err != nil {
@@ -185,7 +233,7 @@ func TestLoadPlaintextJSONWithBOM(t *testing.T) {
 }
 
 func TestSaveLeavesNoTemporaryFile(t *testing.T) {
-	dir := t.TempDir()
+	dir := testTempDir(t)
 	path := filepath.Join(dir, "settings.json")
 	if err := Save(path, DefaultSettings()); err != nil {
 		t.Fatal(err)
@@ -200,7 +248,7 @@ func TestSaveLeavesNoTemporaryFile(t *testing.T) {
 }
 
 func TestLoadLegacySettingsWithoutVoiceFieldKeepsVoiceEnabled(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "settings.json")
+	path := filepath.Join(testTempDir(t), "settings.json")
 	legacy := `{"ollama_url":"http://localhost:11434","model":"llama3.1:8b","system_prompt":"legacy","web_search":true}`
 	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
 		t.Fatal(err)
@@ -219,7 +267,7 @@ func TestLoadLegacySettingsWithoutVoiceFieldKeepsVoiceEnabled(t *testing.T) {
 }
 
 func TestBackupCorruptPreservesOriginalBytes(t *testing.T) {
-	dir := t.TempDir()
+	dir := testTempDir(t)
 	path := filepath.Join(dir, "settings.json")
 	original := []byte("{corrupt settings that must be recoverable")
 	if err := os.WriteFile(path, original, 0o600); err != nil {
@@ -243,7 +291,7 @@ func TestBackupCorruptPreservesOriginalBytes(t *testing.T) {
 }
 
 func TestLoadCorruptFileReturnsDefaultsAndError(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "settings.json")
+	path := filepath.Join(testTempDir(t), "settings.json")
 	if err := os.WriteFile(path, []byte("{not encrypted and not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}

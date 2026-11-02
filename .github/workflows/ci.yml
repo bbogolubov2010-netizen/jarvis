@@ -27,6 +27,10 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Test frontend
+        working-directory: frontend
+        run: npm test
+
       - name: Build frontend
         working-directory: frontend
         run: npm run build
@@ -36,6 +40,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Verify module checksums
+        run: go mod verify
 
       - name: Check formatting
         shell: pwsh
@@ -55,5 +62,14 @@ jobs:
       - name: Test with race detector
         run: go test -race ./...
 
-      - name: Build
+      - name: Build packages
         run: go build ./...
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+
+      # The real deliverable is a Wails executable, not just compilable
+      # packages. -s reuses the frontend build above; -skipbindings keeps
+      # generated wailsjs files out of CI.
+      - name: Build application
+        run: wails build -s -skipbindings -ldflags "-linkmode=internal"

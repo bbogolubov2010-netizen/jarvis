@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { renderMarkdown } from './lib/markdown'
+import { catalogUpdatedLabel, errorText, gameDuration, greeting } from './lib/format'
 
 interface InstalledApp { name: string; icon: string; path: string; args: string[] }
 interface CatalogStatus { count: number; updated_at: number }
@@ -165,6 +166,7 @@ declare global {
           ProcessText(text: string): Promise<string>
           ChatStream(text: string): Promise<ChatStreamStart>
           CancelChatStream(requestID: string): Promise<void>
+          ApproveScreenCapture(): Promise<boolean>
           ProcessWithScreen(text: string): Promise<string>
           GenerateImage(prompt: string, size: string): Promise<string>
           LoadImageBase64(path: string): Promise<string>
@@ -223,11 +225,6 @@ interface Message {
   streamId?: string
 }
 
-function errorText(error: unknown): string {
-  if (error instanceof Error) return error.message
-  return String(error)
-}
-
 function playVoice(key: string) {
   void window.go.main.App.PlayVoicePhrase(key).catch(() => {})
 }
@@ -238,12 +235,6 @@ function now(): string {
 
 
 // --- Chat ---
-function greeting(): string {
-  const h = new Date().getHours()
-  if (h < 12) return 'Good morning'
-  if (h < 18) return 'Good afternoon'
-  return 'Good evening'
-}
 const messages = ref<Message[]>([
   { id: 0, role: 'assistant', content: greeting() + ', Sir. Systems are online and ready.', time: '' }
 ])
@@ -616,6 +607,7 @@ async function confirmScreenAnalysis() {
   input.value = ''
   loading.value = true
   try {
+    await window.go.main.App.ApproveScreenCapture()
     const response = await window.go.main.App.ProcessWithScreen(text)
     addMessage('assistant', response || '...')
   } catch (error) {
@@ -1187,11 +1179,6 @@ async function scanApps() {
   }
 }
 
-function catalogUpdatedLabel(): string {
-  if (!catalogStatus.value.updated_at) return 'not scanned yet'
-  return new Date(catalogStatus.value.updated_at).toLocaleString()
-}
-
 async function loadAutoStartStatus() {
   try {
     autoStartStatus.value = await window.go.main.App.GetAutoStartStatus()
@@ -1225,15 +1212,6 @@ async function loadGameStatus() {
   } catch {
     // Game tracking is optional.
   }
-}
-
-function gameDuration(seconds: number): string {
-  if (!seconds || seconds < 60) return 'less than a minute'
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return minutes + ' min'
-  const hours = Math.floor(minutes / 60)
-  const rest = minutes % 60
-  return rest ? hours + ' h ' + rest + ' min' : hours + ' h'
 }
 
 function showOnboardingTip(content: string) {
@@ -1573,6 +1551,7 @@ onUnmounted(() => {
           <div>
             <label class="text-xs text-gray-500 uppercase tracking-wider block mb-1">Ollama URL</label>
             <input v-model="settingsDraft.ollama_url" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-cyan-500 transition-colors" />
+            <p class="text-[11px] text-gray-600 mt-1">Remote endpoints must use HTTPS. Chat history and prompts leave this PC when a non-local URL is used.</p>
           </div>
           <div>
             <label class="text-xs text-gray-500 uppercase tracking-wider block mb-1">Model</label>
@@ -1675,7 +1654,7 @@ onUnmounted(() => {
             <div>
               <label class="text-xs text-gray-500 uppercase tracking-wider block mb-1">Weather city</label>
               <div class="flex gap-2">
-                <input v-model="settingsDraft.voice_city" placeholder="Москва"
+                <input v-model="settingsDraft.voice_city" placeholder="Moscow"
                   class="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-cyan-500 transition-colors" />
                 <button @click="applyVoiceCity" class="btn-ghost text-xs px-3">SET</button>
                 <button @click="detectVoiceLocation" class="btn-ghost text-xs px-3">DETECT</button>
@@ -1762,7 +1741,7 @@ onUnmounted(() => {
               </button>
             </div>
             <p class="text-[11px] text-gray-500">
-              {{ catalogStatus.count }} applications indexed · {{ catalogUpdatedLabel() }}
+              {{ catalogStatus.count }} applications indexed · {{ catalogUpdatedLabel(catalogStatus.updated_at) }}
             </p>
             <p class="text-[10px] text-gray-600">
               JARVIS can open any indexed application by voice or with /apps. The sidebar keeps a short curated list.
@@ -1922,20 +1901,20 @@ onUnmounted(() => {
         <div class="text-xs tracking-[0.3em] text-cyan-500 uppercase">Weather module</div>
         <h2 class="mt-2">WHERE ARE WE, SIR?</h2>
         <p class="text-sm text-gray-400 mt-3 leading-relaxed">
-          Мой метеорологический модуль не знает, где вы находитесь. Разрешите определить
-          город по сети — я не стану спрашивать координаты у спутников. Или укажите город
-          вручную.
+          My weather module does not know where you are. Allow a network lookup to
+          determine the city — no satellite coordinates are requested — or enter it
+          manually.
         </p>
         <button @click="useIpLocation" :disabled="locationBusy" class="btn-neon w-full mt-4">
           {{ locationBusy ? 'DETECTING...' : 'DETECT AUTOMATICALLY' }}
         </button>
         <div class="flex gap-2 mt-2">
-          <input v-model="locationCity" placeholder="Москва" @keyup.enter="saveLocationCity"
+          <input v-model="locationCity" placeholder="Moscow" @keyup.enter="saveLocationCity"
             class="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-cyan-500 transition-colors" />
           <button @click="saveLocationCity" :disabled="locationBusy" class="btn-ghost px-4">SAVE CITY</button>
         </div>
         <p v-if="locationError" class="text-xs text-red-400 mt-2">{{ locationError }}</p>
-        <button @click="dismissLocationPrompt" class="text-xs text-gray-600 hover:text-gray-400 mt-3">Позже</button>
+        <button @click="dismissLocationPrompt" class="text-xs text-gray-600 hover:text-gray-400 mt-3">Later</button>
       </div>
     </div>
 

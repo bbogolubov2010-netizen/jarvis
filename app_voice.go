@@ -194,6 +194,7 @@ func (a *App) startVoiceInput() error {
 	manager.SetWakeWordDisabled(settings.WakeWordDisabled)
 	manager.SetLanguage(settings.VoiceLanguage)
 	var err error
+	startCtx := a.voiceBaseContext()
 	for attempt := 0; attempt < 25; attempt++ {
 		a.voiceMu.Lock()
 		starting := a.voiceStarting
@@ -201,13 +202,22 @@ func (a *App) startVoiceInput() error {
 		if !starting {
 			break
 		}
+		if startCtx.Err() != nil {
+			manager.Stop()
+			return errVoiceStartCanceled
+		}
 		err = manager.Start()
 		if err == nil {
 			break
 		}
 		// The background agent may still be releasing the microphone during
 		// a cold-start handoff. Retry briefly before reporting a failure.
-		time.Sleep(400 * time.Millisecond)
+		select {
+		case <-startCtx.Done():
+			manager.Stop()
+			return errVoiceStartCanceled
+		case <-time.After(400 * time.Millisecond):
+		}
 	}
 
 	a.voiceMu.Lock()
@@ -267,6 +277,7 @@ func (a *App) restartVoiceInput() error {
 // must not leave JARVIS deaf until the next manual restart.
 func (a *App) startVoiceInputWithRetry() {
 	backoff := 5 * time.Second
+	ctx := a.voiceBaseContext()
 	for attempt := 0; attempt < 6; attempt++ {
 		if a.voiceInputDisabled() || a.voiceManager() != nil {
 			return
@@ -278,7 +289,11 @@ func (a *App) startVoiceInputWithRetry() {
 		if err != nil && !errors.Is(err, errVoiceStartCanceled) {
 			agentLog("voice input start (attempt %d): %v", attempt+1, err)
 		}
-		time.Sleep(backoff)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
 		if backoff < 30*time.Second {
 			backoff += 5 * time.Second
 		}
@@ -750,24 +765,24 @@ func (a *App) handleSecondInstance(args []string) {
 			a.showWindowSilent()
 			go a.pushToTalkWhenReady()
 			return
-		case "--voice-command-b64":
-			// Commands now arrive over authenticated IPC. A legacy command
-			// argument is deliberately ignored rather than executed.
-			a.showWindow()
-			return
 		}
 	}
 	a.showWindow()
 }
 
 func (a *App) pushToTalkWhenReady() {
+	ctx := a.voiceBaseContext()
 	for attempt := 0; attempt < 150; attempt++ {
 		if manager := a.voiceManager(); manager != nil {
 			if manager.PushToTalk() {
 				return
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 }
 
